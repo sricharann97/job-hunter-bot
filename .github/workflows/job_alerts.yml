@@ -1,0 +1,29 @@
+name: Job Alert Bot
+
+on:
+  schedule:
+    - cron: '30 2 * * *'   # 8:00 AM IST
+    - cron: '30 13 * * *'  # 7:00 PM IST
+  workflow_dispatch:        # Manual trigger button
+
+jobs:
+  run-job-hunter:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run Job Hunter
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python job_hunter.py
