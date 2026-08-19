@@ -2,9 +2,9 @@ name: Job Alert Bot
 
 on:
   schedule:
-    - cron: '30 2 * * *'   # 8:00 AM IST
-    - cron: '30 13 * * *'  # 7:00 PM IST
-  workflow_dispatch:        # Manual trigger button
+    - cron: '30 2 * * *'
+    - cron: '30 13 * * *'
+  workflow_dispatch:
 
 jobs:
   run-job-hunter:
@@ -12,10 +12,10 @@ jobs:
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
