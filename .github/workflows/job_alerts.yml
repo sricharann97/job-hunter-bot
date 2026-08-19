@@ -2,14 +2,23 @@ name: Job Alert Bot
 
 on:
   schedule:
-    - cron: '30 2 * * *'
-    - cron: '30 13 * * *'
-  workflow_dispatch:
+    # Every 3 hours IST (08:30, 11:30, 14:30, 17:30, 20:30, 23:30, 02:30, 05:30)
+    - cron: '0 3 * * *'
+    - cron: '0 6 * * *'
+    - cron: '0 9 * * *'
+    - cron: '0 12 * * *'
+    - cron: '0 15 * * *'
+    - cron: '0 18 * * *'
+    - cron: '0 21 * * *'
+    - cron: '0 0 * * *'
+  workflow_dispatch:   # manual test trigger
+
+permissions:
+  contents: write      # needed to commit seen_jobs.json back
 
 jobs:
   run-job-hunter:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -17,13 +26,21 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       - name: Install dependencies
         run: pip install requests
 
-      - name: Run Job Hunter
+      - name: Run job hunter script
         env:
-          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python job_hunter.py
+
+      - name: Commit updated tracking file
+        run: |
+          git config user.name "job-hunter-bot"
+          git config user.email "actions@github.com"
+          git add seen_jobs.json
+          git commit -m "Update job tracker [skip ci]" || echo "Nothing to commit"
+          git push
