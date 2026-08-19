@@ -1,139 +1,230 @@
 import os
-import requests
-from datetime import datetime
+import json
+import time
+from datetime import datetime, timezone, timedelta
 
-# ── Telegram Config ──────────────────────────────────────────
-TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
+import requests
+
+# ── Telegram Config ────────────────────────────────
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-# ── Candidate Profile ─────────────────────────────────────────
+# ── Candidate Profile ────────────────────────────────
+# Lowercase-only: the script lowercases job text before matching.
 KEYWORDS = [
-    "Accounts Executive", "Accounts Assistant", "Junior Accountant",
-    "Accountant Trainee", "Tally Operator", "GST Assistant",
-    "GST Executive", "TDS Assistant", "Billing Executive",
-    "Data Entry Accounts", "Finance Assistant", "Bookkeeper",
-    "Back Office Finance", "MIS Executive"
+    "accounts executive", "accounts assistant", "junior accountant",
+    "accountant trainee", "tally operator", "gst assistant",
+    "gst executive", "tds assistant", "billing executive",
+    "finance assistant", "bookkeeper", "back office finance",
+    "mis executive", "accountant", "finance", "accounting",
+    "tally", "audit", "clerk", "data entry", "admin",
 ]
 
-LOCATIONS = ["Hyderabad", "Secunderabad", "Telangana", "Remote", "Work From Home"]
+# ── Seen-job tracking (dedup) ────────────────────────────────
+SEEN_FILE = "seen_jobs.json"
+# A job link older than this stops generating alerts (feed churn). 30 days.
+FRESHNESS_DAYS = 30
 
-# ── Telegram Sender ───────────────────────────────────────────
+
+def load_seen():
+    if os.path.exists(SEEN_FILE):
+        with open(SEEN_FILE, "r") as f:
+            data = json.load(f)
+            # {url: iso_timestamp}
+            return data.get("seen", {})
+    return {}
+
+
+def save_seen(seen):
+    # Purge very old entries so the file stays small.
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+    seen = {u: t for u, t in seen.items() if t > cutoff}
+    with open(SEEN_FILE, "w") as f:
+        json.dump({"last_run_utc": datetime.now(timezone.utc).isoformat(),
+                   "seen": seen}, f, indent=2)
+
+
+# ── Telegram Sender ─────────────────────────────────────────────────────────────────
+
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
         "parse_mode": "HTML",
-        "disable_web_page_preview": False
+        "disable_web_page_preview": False,
     }
-    requests.post(url, json=payload)
+    try:
+        r = requests.post(url, json=payload, timeout=15)
+        print(f"Telegram HTTP {r.status_code}")
+    except Exception as e:
+        print(f"Telegram send failed: {e}")
 
-# ── Job Search — Indeed ───────────────────────────────────────
-def search_indeed():
-    jobs = []
-    headers = {"User-Agent": "Mozilla/5.0"}
-    
-    for keyword in KEYWORDS[:5]:  # top 5 roles
-        for location in ["Hyderabad", "Remote"]:
-            url = (
-                f"https://indeed.com/jobs"
-                f"?q={keyword.replace(' ', '+')}"
-                f"&l={location}"
-                f"&fromage=1"  # last 24 hours
-                f"&explvl=entry_level"
-            )
-            jobs.append({
-                "title": keyword,
-                "location": location,
-                "platform": "Indeed",
-                "url": url
-            })
-    return jobs
 
-# ── Job Search — Naukri ───────────────────────────────────────
-def search_naukri():
+# ── Source 1: Arbeitsnow (Germany + Remote) ─────────────────────────────────
+ARBEITNOW_URL = "https://www.arbeitnow.com/api/job-board-api"
+
+
+def fetch_arbeitnow():
+    """Real individual listings: title, company, location, apply URL, description."""
+    r = requests.get(ARBEITNOW_URL, timeout=20)
+    r.raise_for_status()
     jobs = []
-    for keyword in KEYWORDS[:5]:
-        url = (
-            f"https://www.naukri.com/"
-            f"{keyword.lower().replace(' ', '-')}-jobs-in-hyderabad"
-        )
+    for j in r.json().get("data", [])[:200]:
         jobs.append({
-            "title": keyword,
-            "location": "Hyderabad",
-            "platform": "Naukri",
-            "url": url
+            "id": j.get("slug", j.get("url", "")),
+            "title": j.get("title", ""),
+            "company": j.get("company_name", "Unknown"),
+            "location": j.get("location", "Not specified"),
+            "url": j.get("url", ""),
+            "posted": (j.get("date") or "")[:10],
+            "haystack": (f"{j.get('title','')} {j.get('description','')} {j.get('company_name','')}")
+                          .lower(),
+            "source": "Arbeitnow",
         })
     return jobs
 
-# ── Job Search — Internshala ──────────────────────────────────
-def search_internshala():
+
+# ── Source 2: RemoteOK (remote jobs worldwide) ────────────────────────────
+REMOTEOK_URL = "https://remoteok.com/api"
+
+
+def fetch_remoteok():
+    r = requests.get(REMOTEOK_URL, timeout=20)
+    if r.status_code != 200:
+        return []
     jobs = []
-    for keyword in ["Accounts", "Tally", "GST", "Finance", "Data Entry"]:
-        url = (
-            f"https://internshala.com/jobs/"
-            f"{keyword.lower()}-jobs-in-hyderabad"
-        )
+    data = r.json()
+    if isinstance(data, list):
+        data = data[1:]  # skip the meta row
+    for j in data[:100]:
         jobs.append({
-            "title": f"{keyword} Role",
-            "location": "Hyderabad / Remote",
-            "platform": "Internshala",
-            "url": url
+            "id": j.get("slug", j.get("url", "")),
+            "title": j.get("position", j.get("title", "")),
+            "company": j.get("company", "Unknown"),
+            "location": j.get("location", "Remote"),
+            "url": j.get("apply_url") or j.get("url", ""),
+            "posted": datetime.fromtimestamp(j.get("epoch", 0), tz=timezone.utc).date().isoformat()
+                      if j.get("epoch") else "",
+            "haystack": f"{j.get('position','')} {' '.join(j.get('tags', []) or [])} "
+                        f"{j.get('description','')}".lower(),
+            "source": "RemoteOK",
         })
     return jobs
 
-# ── Format & Send Report ──────────────────────────────────────
-def build_report(all_jobs):
-    now        = datetime.now()
-    period     = "🌅 Morning" if now.hour < 12 else "🌆 Evening"
-    date_str   = now.strftime("%d %b %Y")
-    time_str   = now.strftime("%I:%M %p")
 
-    header = (
-        f"📋 <b>JOB ALERT — {period} Report</b>\n"
-        f"📅 {date_str} | ⏰ {time_str} IST\n"
-        f"👤 Aadirala Sri Charan | Hyderabad\n"
-        f"{'─'*30}\n\n"
+# ── Source 3: The Muse (US jobs) ────────────────────────────────────────
+MUSE_URL = "https://www.themuse.com/api/public/jobs"
+
+
+def fetch_muse():
+    """Paginate a few pages; build individual job links from ids."""
+    jobs = []
+    for page in range(1, 4):
+        try:
+            r = requests.get(f"{MUSE_URL}?page={page}", timeout=20)
+            if r.status_code != 200:
+                break
+            results = r.json().get("results", [])
+            if not results:
+                break
+            for j in results:
+                cats = [c.get("name", "") for c in (j.get("categories") or [])]
+                tags = [t.get("name", "") for t in (j.get("tags") or [])]
+                locs = [l.get("name", "") for l in (j.get("locations") or [])]
+                jobs.append({
+                    "id": str(j.get("id", "")),
+                    "title": j.get("name", ""),
+                    "company": (j.get("company") or {}).get("name", "Unknown"),
+                    "location": ", ".join(locs) or "US",
+                    "url": f"https://www.themuse.com/jobs/{j.get('company', {}).get('name', '').lower().replace(' ', '-').replace('.', '')}/{j.get('id')}",
+                    "posted": (j.get("publication_date") or "")[:10],
+                    "haystack": f"{j.get('name','')} {' '.join(cats)} {' '.join(tags)} "
+                                f"{' '.join(locs)}".lower(),
+                    "source": "The Muse",
+                })
+            time.sleep(0.3)
+        except Exception:
+            break
+    return jobs
+
+
+# ── Matching & Reporting ────────────────────────────────────────
+def matches(haystack):
+    return any(k in haystack for k in KEYWORDS)
+
+
+def build_alert(job):
+    posted = f" | U0001F4C5 Posted: {job['posted']}" if job.get("posted") else ""
+    return (
+        f"\U0001F4BC <b>{job['title'].title()}</b>\n"
+        f"\U0001F3E2 {job['company']}\n"
+        f"\U0001F4CD {job['location']}{posted}\n"
+        f"\U0001F310 {job['source']}\n"
+        f"\U0001F517 <a href='{job['url']}'>Apply Here</a>"
     )
 
-    body = ""
-    for i, job in enumerate(all_jobs, 1):
-        body += (
-            f"🔥 <b>{i}. {job['title']}</b>\n"
-            f"📍 {job['location']}\n"
-            f"🌐 {job['platform']}\n"
-            f"🔗 <a href='{job['url']}'>Apply Here</a>\n\n"
-        )
 
-    footer = (
-        f"{'─'*30}\n"
-        f"✅ Total Roles Found: {len(all_jobs)}\n"
-        f"💡 Tip: Apply within 24hrs for fresher roles!\n"
-        f"📧 aadiralasricharan@gmail.com\n"
-        f"📞 9666915214"
-    )
-
-    return header + body + footer
-
-# ── Main ──────────────────────────────────────────────────────
 def main():
-    print("🔍 Searching jobs...")
-
+    print("Fetching real job listings...")
     all_jobs = []
-    all_jobs += search_indeed()
-    all_jobs += search_naukri()
-    all_jobs += search_internshala()
+    for fetch_fn in [fetch_arbeitnow, fetch_remoteok, fetch_muse]:
+        try:
+            all_jobs += fetch_fn()
+        except Exception as e:
+            print(f"{fetch_fn.__name__} failed: {e}")
 
-    print(f"✅ Found {len(all_jobs)} job links")
+    print(f"Fetched {len(all_jobs)} real job listings")
+    seen = load_seen()
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=FRESHNESS_DAYS)
 
-    # Split into chunks (Telegram 4096 char limit)
-    report = build_report(all_jobs)
-    chunks = [report[i:i+4000] for i in range(0, len(report), 4000)]
+    alerts = []
+    for job in all_jobs:
+        if not job.get("url") or not matches(job["haystack"]):
+            continue
+        posted = None
+        try:
+            if job.get("posted"):
+                posted = datetime.strptime(job["posted"], "%Y-%m-%d").replace(
+                    tzinfo=timezone.utc)
+        except ValueError:
+            posted = None
+        # Already alerted once → skip (dedup).
+        if job["url"] in seen:
+            continue
+        # Very old postings don't get alerts.
+        if posted is not None and posted < cutoff:
+            continue
+        alerts.append(job)
+        seen[job["url"]] = now.isoformat()
 
-    for chunk in chunks:
-        send_telegram(chunk)
+    save_seen(seen)
 
-    print("📨 Report sent to Telegram!")
+    # Chunked Telegram delivery (4096 char limit per message).
+    period = "Morning" if datetime.now(timezone.utc).hour < 12 else "Evening"
+    if alerts:
+        header = (
+            f"\U0001F4CB <b>NEW JOB ALERTS \u2014 {period} Scan</b>\n"
+            f"\U0001F4E5 {len(alerts)} new match(es)\n" + ("\u2500" * 30) + "\n\n"
+        )
+        chunks = []
+        current = header
+        for a in alerts[:12]:  # cap per run
+            block = "\n" + build_alert(a) + "\n"
+            if len(current) + len(block) > 3800:
+                chunks.append(current)
+                current = header
+            current += block
+        if current:
+            chunks.append(current)
+        for chunk in chunks:
+            send_telegram(chunk)
+        print(f"Sent {len(alerts[:12])} alert(s) to Telegram")
+    else:
+        print("No new matching jobs this run. Nothing sent.")
+        print(f"Tracking {len(seen)} seen job links total.")
+
 
 if __name__ == "__main__":
     main()
