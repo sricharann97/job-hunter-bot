@@ -178,9 +178,21 @@ def fetch_indeed():
                     page.goto(u, wait_until="domcontentloaded", timeout=40000)
                     page.wait_for_timeout(4000)
                     page_html = page.content()
+                    title = (page.title() or '').strip()
+                    print(f'Indeed browser page title ({q}): {title[:80]}')
                     if "mosaic-provider-jobcards" in page_html:
                         out += _parse_mosaic(page_html)
                         fetched = True
+                        print(f'Indeed browser: {len(out)} jobs parsed ({q})')
+                    elif "not provide services in your region" in page_html:
+                        # Cloud/datacenter IP geo-block — runner IPs are always
+                        # blocked here. Indeed jobs are supplied by the
+                        # Manus research/auto-apply layer instead.
+                        print('Indeed SKIP: blocked for this region (runner IP) — '
+                              'Indeed jobs arrive via the research layer.')
+                        return out  # skip remaining queries to avoid spam logs
+                    else:
+                        print(f'Indeed browser: mosaic missing — title={title[:60]} len={len(page_html)} ({q})')
                 finally:
                     browser.close()
         except Exception as e:
@@ -189,6 +201,10 @@ def fetch_indeed():
         if not fetched:
             # Fallback: plain requests (works from residential/home IPs)
             r = safe_get(u)
+            if r and "not provide services in your region" in r.text:
+                print('Indeed SKIP: blocked for this region (runner IP) — '
+                      'Indeed jobs arrive via the research layer.')
+                return out
             if r:
                 s = BeautifulSoup(r.text, 'html.parser')
                 for c in s.select('div.job_seen_beacon') or s.select('div[data-jk]'):
