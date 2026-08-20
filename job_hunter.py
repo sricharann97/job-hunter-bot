@@ -1,278 +1,172 @@
-import html
+import html,json,os,time
 
-import json
-
-import os
-
-import time
-
-from datetime import datetime, timezone, timedelta
+from datetime import datetime,timezone,timedelta
 
 from urllib.parse import quote_plus
-
-
 
 import requests
 
 from bs4 import BeautifulSoup
 
+TOKEN=os.environ['TELEGRAM_TOKEN']; CHAT=os.environ['TELEGRAM_CHAT_ID']
 
+KEYWORDS=['accounts executive','accounts assistant','junior accountant','accountant trainee','tally operator','gst assistant','gst executive','tds assistant','billing executive','finance assistant','bookkeeper','back office finance','mis executive','accountant','finance','accounting','tally','audit','clerk','data entry','admin']
 
-# Telegram Config
+SEEN='seen_jobs.json'; TIMEOUT=20; DAYS=30
 
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+HEAD={'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36','Accept-Language':'en-IN,en;q=0.9'}
 
-TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-
-
-
-# Candidate search keywords
-
-KEYWORDS = [
+def norm(j):
     
-    "accounts executive", "accounts assistant", "junior accountant",
+ j['title']=j.get('title','').strip();j['company']=j.get('company','Unknown').strip();j['location']=j.get('location','Not specified').strip();j['url']=j.get('url','').strip();j['haystack']=j.get('haystack',f"{j['title']} {j['company']} {j['location']}").lower();return j
     
-    "accountant trainee", "tally operator", "gst assistant",
+def unique(js):
     
-    "gst executive", "tds assistant", "billing executive",
+ d={}
     
-    "finance assistant", "bookkeeper", "back office finance",
+ for j in js:
+     
+  k=j.get('url') or j.get('id')
+     
+  if k:d.setdefault(k,j)
+      
+ return list(d.values())
     
-    "mis executive", "accountant", "finance", "accounting",
-    
-    "tally", "audit", "clerk", "data entry", "admin",
-    
-]
-
-
-
-SEEN_FILE = "seen_jobs.json"
-
-FRESHNESS_DAYS = 30
-
-TIMEOUT = 20
-
-HEADERS = {
-    
-    "User-Agent": (
-        
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        
-        "Chrome/124.0 Safari/537.36"
-        
-    ),
-    
-    "Accept-Language": "en-IN,en;q=0.9",
-    
-}
-
-
-
-
-
-def load_seen():
-    
-    if os.path.exists(SEEN_FILE):
-        
-        try:
-            
-            with open(SEEN_FILE, "r", encoding="utf-8") as f:
-                
-                return json.load(f).get("seen", {})
-                
-        except (OSError, ValueError):
-            
-            print("Could not read seen_jobs.json; starting with an empty tracker.")
-            
-    return {}
-    
-
-
-
-
-def save_seen(seen):
-    
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
-    
-    trimmed = {u: t for u, t in seen.items() if t > cutoff}
-    
-    with open(SEEN_FILE, "w", encoding="utf-8") as f:
-        
-        json.dump(
-            
-            {"last_run_utc": datetime.now(timezone.utc).isoformat(), "seen": trimmed},
-            
-            f,
-            
-            indent=2,
-            
-        )
-        
-
-
-
-
-def send_telegram(message):
-    
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    
-    payload = {
-        
-        "chat_id": TELEGRAM_CHAT_ID,
-        
-        "text": message,
-        
-        "parse_mode": "HTML",
-        
-        "disable_web_page_preview": False,
-        
-    }
-    
-    try:
-        
-        response = requests.post(url, json=payload, timeout=15)
-        
-        print(f"Telegram HTTP {response.status_code}")
-        
-        if response.status_code != 200:
-            
-            print(response.text[:300])
-            
-    except Exception as exc:
-        
-        print(f"Telegram send failed: {exc}")
-        
-
-
-
-
-def normalise_job(job):
-    
-    job["title"] = job.get("title", "").strip()
-    
-    job["company"] = job.get("company", "Unknown").strip()
-    
-    job["location"] = job.get("location", "Not specified").strip()
-    
-    job["url"] = job.get("url", "").strip()
-    
-    job["haystack"] = job.get(
-        
-        "haystack", f"{job['title']} {job['company']} {job['location']}"
-        
-    ).lower()
-    
-    return job
-    
-
-
-
-
 def fetch_arbeitnow():
     
-    response = requests.get(
-        
-        "https://www.arbeitnow.com/api/job-board-api", timeout=TIMEOUT
-        
-    )
+ r=requests.get('https://www.arbeitnow.com/api/job-board-api',timeout=TIMEOUT);r.raise_for_status();out=[]
     
-    response.raise_for_status()
+ for x in r.json().get('data',[])[:200]:out.append(norm({'id':x.get('slug',x.get('url','')),'title':x.get('title',''),'company':x.get('company_name','Unknown'),'location':x.get('location','Not specified'),'url':x.get('url',''),'posted':(x.get('date') or '')[:10],'haystack':f"{x.get('title','')} {x.get('description','')} {x.get('company_name','')}",'source':'Arbeitnow'}))
+     
+ return out
     
-    jobs = []
-    
-    for item in response.json().get("data", [])[:200]:
-        
-        jobs.append(normalise_job({
-            
-            "id": item.get("slug", item.get("url", "")),
-            
-            "title": item.get("title", ""),
-            
-            "company": item.get("company_name", "Unknown"),
-            
-            "location": item.get("location", "Not specified"),
-            
-            "url": item.get("url", ""),
-            
-            "posted": (item.get("date") or "")[:10],
-            
-            "haystack": f"{item.get('title', '')} {item.get('description', '')} "
-            
-                        f"{item.get('company_name', '')}",
-            
-            "source": "Arbeitnow",
-            
-        }))
-        
-    return jobs
-    
-
-
-
-
 def fetch_remoteok():
     
-    response = requests.get("https://remoteok.com/api", headers=HEADERS, timeout=TIMEOUT)
+ r=requests.get('https://remoteok.com/api',headers=HEAD,timeout=TIMEOUT)
     
-    if response.status_code != 200:
-        
-        return []
-        
-    data = response.json()
+ if r.status_code!=200:return []
+     
+ data=r.json();data=data[1:] if isinstance(data,list) else data;out=[]
     
-    if isinstance(data, list):
-        
-        data = data[1:]
-        
-    jobs = []
+ for x in data[:100]:
+     
+  posted=datetime.fromtimestamp(x['epoch'],timezone.utc).date().isoformat() if x.get('epoch') else ''
+     
+  out.append(norm({'id':x.get('slug',x.get('url','')),'title':x.get('position',x.get('title','')),'company':x.get('company','Unknown'),'location':x.get('location','Remote'),'url':x.get('apply_url') or x.get('url',''),'posted':posted,'haystack':f"{x.get('position','')} {' '.join(x.get('tags',[]) or [])} {x.get('description','')}",'source':'RemoteOK'}))
+     
+ return out
     
-    for 
+def fetch_muse():
+    
+ out=[]
+    
+ for p in range(1,4):
+     
+  try:
+      
+   r=requests.get(f'https://www.themuse.com/api/public/jobs?page={p}',timeout=TIMEOUT)
+      
+   if r.status_code!=200:break
+       
+   rows=r.json().get('results',[])
+      
+   if not rows:break
+       
+   for x in rows:
+       
+    cats=[z.get('name','') for z in x.get('categories',[])];tags=[z.get('name','') for z in x.get('tags',[])];locs=[z.get('name','') for z in x.get('locations',[])];co=(x.get('company') or {}).get('name','Unknown');slug=co.lower().replace(' ','-').replace('.','')
+       
+    out.append(norm({'id':str(x.get('id','')),'title':x.get('name',''),'company':co,'location':', '.join(locs) or 'US','url':f"https://www.themuse.com/jobs/{slug}/{x.get('id')}",'posted':(x.get('publication_date') or '')[:10],'haystack':f"{x.get('name','')} {' '.join(cats)} {' '.join(tags)} {' '.join(locs)}",'source':'The Muse'}))
+       
+   time.sleep(.3)
+      
+  except requests.RequestException as e:print('Muse failed:',e);break
+      
+ return out
+    
+    cats=[z.get('name','') for z in x.get('categories',[])];tags=[z.get('name','') for z in x.get('tags',[])];locs=[z.get('name','') for z in x.get('locations',[])];co=(x.get('company') or {}).get('name','Unknown');slug=co.lower().replace(' ','-').replace('.','')
+    out.append(norm({'id':str(x.get('id','')),'title':x.get('name',''),'company':co,'location':', '.join(locs) or 'US','url':f"https://www.themuse.com/jobs/{slug}/{x.get('id')}",'posted':(x.get('publication_date') or '')[:10],'haystack':f"{x.get('name','')} {' '.join(cats)} {' '.join(tags)} {' '.join(locs)}",'source':'The Muse'}))
+   time.sleep(.3)
+  except requests.RequestException as e:print('Muse failed:',e);break
+ return out
+def fetch_linkedin():
+ out=[]
+ for q in ['accounts executive tally','junior accountant fresher','gst finance fresher']:
+  u='https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords='+quote_plus(q)+'&location=Hyderabad%2C%20Telangana&f_TPR=r86400&start=0'
+  try:
+   r=requests.get(u,headers=HEAD,timeout=TIMEOUT)
+   if r.status_code!=200:print('LinkedIn HTTP',r.status_code);continue
+   s=BeautifulSoup(r.text,'html.parser')
+   for c in s.select('li'):
+    t=c.select_one('h3.base-search-card__title');a=c.select_one('a.base-card__full-link')
+    if not t or not a:continue
+    co=c.select_one('h4.base-search-card__subtitle');lo=c.select_one('span.job-search-card__location');dt=c.select_one('time');url=a.get('href','').split('?')[0]
+    out.append(norm({'id':c.get('data-entity-urn') or url,'title':t.get_text(' ',strip=True),'company':co.get_text(' ',strip=True) if co else 'Unknown','location':lo.get_text(' ',strip=True) if lo else 'Hyderabad','url':url,'posted':dt.get('datetime','')[:10] if dt else '','haystack':c.get_text(' ',strip=True),'source':'LinkedIn'}))
+  except requests.RequestException as e:print('LinkedIn failed:',e)
+ return unique(out)
+def fetch_indeed():
+ out=[]
+ for q in ['accounts executive tally','junior accountant fresher','gst finance fresher']:
+  u='https://in.indeed.com/jobs?q='+quote_plus(q)+'&l=Hyderabad%2C+Telangana&fromage=1'
+  try:
+   r=requests.get(u,headers=HEAD,timeout=TIMEOUT)
+   if r.status_code!=200:print('Indeed HTTP',r.status_code);continue
+   s=BeautifulSoup(r.text,'html.parser')
+   for c in s.select('div.job_seen_beacon') or s.select('div[data-jk]'):
+    t=c.select_one('h2.jobTitle a,h2 a')
+    if not t:continue
+    jk=c.get('data-jk') or t.get('data-jk','');href=f'https://in.indeed.com/viewjob?jk={jk}' if jk else t.get('href','');
+    if href.startswith('/'):href='https://in.indeed.com'+href
+    co=c.select_one("[data-testid='company-name'],span.companyName");lo=c.select_one("[data-testid='text-location'],div.companyLocation");sa=c.select_one("[data-testid='attribute_snippet'],.salary-snippet-container");dt=c.select_one('.date,span.date')
+    out.append(norm({'id':jk or href,'title':t.get_text(' ',strip=True),'company':co.get_text(' ',strip=True) if co else 'Unknown','location':lo.get_text(' ',strip=True) if lo else 'Hyderabad','url':href,'posted':dt.get_text(' ',strip=True) if dt else '','haystack':c.get_text(' ',strip=True),'source':'Indeed','salary':sa.get_text(' ',strip=True) if sa else ''}))
+  except requests.RequestException as e:print('Indeed failed:',e)
+ return unique(out)
+def send(m):
+ r=requests.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':CHAT,'text':m,'parse_mode':'HTML'},timeout=15);print('Telegram HTTP',r.status_code)
+def main():
+ allj=[]
+ for f in [fetch_arbeitnow,fetch_remoteok,fetch_muse,fetch_linkedin,fetch_indeed]:
+  try:
+   j=f();print(f.__name__,len(j));allj+=j
+  except Exception as e:print(f.__name__,'failed safely:',e)
+ allj=unique(allj);seen={}
+ try:
+  with open(SEEN,encoding='utf-8') as f:seen=json.load(f).get('seen',{})
+ except (OSError,ValueError):pass
+ now=datetime.now(timezone.utc);cut=now-timedelta(days=DAYS);alerts=[]
+ for j in allj:
+  if not j.get('url') or not any(k in j.get('haystack','') for k in KEYWORDS) or j['url'] in seen:continue
+  try:posted=datetime.strptime(j.get('posted','')[:10],'%Y-%m-%d').replace(tzinfo=timezone.utc)
+  except ValueError:posted=None
+  if posted and posted<cut:continue
+  alerts.append(j);seen[j['url']]=now.isoformat()
+ with open(SEEN,'w',encoding='utf-8') as f:json.dump({'last_run_utc':now.isoformat(),'seen':{u:t for u,t in seen.items() if t>(now-timedelta(days=60)).isoformat()}},f,indent=2)
+ if not alerts:print('No new matching jobs.');return
+ chunks=[];cur='📋 <b>NEW JOB ALERTS</b>
+📥 '+str(len(alerts))+' new match(es)
 
+'
+ for j in alerts[:12]:
+  p=(' | Posted: '+html.escape(j['posted'])) if j.get('posted') else '';sal=('
+💰 '+html.escape(j['salary'])) if j.get('salary') else ''
+  b=f"💼 <b>{html.escape(j['title'].title())}</b>
+🏢 {html.escape(j['company'])}
+📍 {html.escape(j['location'])}{p}{sal}
+🌐 {j.get('source','')}
+🔗 <a href='{html.escape(j['url'],quote=True)}'>Apply Here</a>
 
+"
+  if len(cur)+len(b)>3800:chunks.append(cur);cur='📋 <b>NEW JOB ALERTS</b>
 
+'
+  cur+=b
+ chunks.append(cur)
+ for c in chunks:send(c)
+ print('Sent',min(12,len(alerts)),'alerts')
+if __name__=='__main__':main()
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+# quote is used only for Telegram URL escaping
+from urllib.parse import quote
 
 
 
