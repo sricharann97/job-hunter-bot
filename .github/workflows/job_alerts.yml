@@ -28,17 +28,13 @@ jobs:
         with:
           python-version: '3.12'
 
-      # FIX 9: Indeed sits behind Cloudflare — need a real browser (Playwright)
-      # to fetch Indeed listings. requests/BeautifulSoup kept as fallback parser.
+      # FIX 9: Indeed geo-blocks all cloud/datacenter IPs ("does not provide
+      # services in your region") — the runner skips Indeed cleanly and its
+      # listings arrive via the Manus research/auto-apply layer instead.
+      # Playwright is still installed so the browser path works when run
+      # outside a datacenter (e.g., home network / residential IP).
       - name: Install dependencies
         run: pip install requests beautifulsoup4 playwright
-
-      - name: Install Chromium for Playwright
-        run: |
-          playwright install chromium --with-deps || playwright install chromium
-          # Ubuntu runners ship system Chromium; link it so Playwright can find it
-          [ -x /usr/bin/chromium-browser ] && sudo ln -sf /usr/bin/chromium-browser /usr/bin/chromium 2>/dev/null || true
-          [ -x /usr/bin/chromium ] || sudo ln -sf /usr/bin/google-chrome-stable /usr/bin/chromium 2>/dev/null || true
 
       - name: Run job hunter script
         env:
