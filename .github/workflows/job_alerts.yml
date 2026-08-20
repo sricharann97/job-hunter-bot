@@ -1,127 +1,55 @@
 name: Job Alert Bot
 
-
-
 on:
-
   schedule:
-  
     # Every 3 hours IST (08:30, 11:30, 14:30, 17:30, 20:30, 23:30, 02:30, 05:30)
-    
     - cron: '0 3 * * *'
-    
     - cron: '0 6 * * *'
-    
     - cron: '0 9 * * *'
-    
     - cron: '0 12 * * *'
-    
     - cron: '0 15 * * *'
-    
     - cron: '0 18 * * *'
-    
     - cron: '0 21 * * *'
-    
     - cron: '0 0 * * *'
-    
   workflow_dispatch:
-  
-
 
 permissions:
-
   contents: write
-  
-
 
 jobs:
-
   run-job-hunter:
-  
     runs-on: ubuntu-latest
-    
     steps:
-    
       - name: Checkout repo
-      
         uses: actions/checkout@v4
-        
-
 
       - name: Set up Python
-      
         uses: actions/setup-python@v5
-        
         with:
-        
           python-version: '3.12'
-          
 
-
+      # FIX 9: Indeed sits behind Cloudflare — need a real browser (Playwright)
+      # to fetch Indeed listings. requests/BeautifulSoup kept as fallback parser.
       - name: Install dependencies
-      
-        run: pip install requests beautifulsoup4
-        
+        run: pip install requests beautifulsoup4 playwright
 
+      - name: Install Chromium for Playwright
+        run: |
+          playwright install chromium --with-deps || playwright install chromium
+          # Ubuntu runners ship system Chromium; link it so Playwright can find it
+          [ -x /usr/bin/chromium-browser ] && sudo ln -sf /usr/bin/chromium-browser /usr/bin/chromium 2>/dev/null || true
+          [ -x /usr/bin/chromium ] || sudo ln -sf /usr/bin/google-chrome-stable /usr/bin/chromium 2>/dev/null || true
 
       - name: Run job hunter script
-      
         env:
-        
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          
         run: python job_hunter.py
-        
-
 
       - name: Commit updated tracking file
-      
         run: |
-        
           git config user.name "job-hunter-bot"
-          
           git config user.email "actions@github.com"
-          
           git add seen_jobs.json
-          
           git commit -m "Update job tracker [skip ci]" || echo "Nothing to commit"
-          
           git push
-          
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
