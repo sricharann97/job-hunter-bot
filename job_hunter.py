@@ -205,6 +205,10 @@ def fetch_indeed():
                 print('Indeed SKIP: blocked for this region (runner IP) — '
                       'Indeed jobs arrive via the research layer.')
                 return out
+            if r is None:
+                print('Indeed SKIP: blocked for this region (runner IP) — '
+                      'Indeed jobs arrive via the research layer.')
+                return out
             if r:
                 s = BeautifulSoup(r.text, 'html.parser')
                 for c in s.select('div.job_seen_beacon') or s.select('div[data-jk]'):
