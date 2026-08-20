@@ -1,48 +1,3 @@
-import html, json, os, time
-from datetime import datetime, timezone, timedelta
-from urllib.parse import quote_plus
-import requests
-from bs4 import BeautifulSoup
-
-# --- Config ---
-TOKEN = os.environ['TELEGRAM_TOKEN']
-CHAT  = os.environ['TELEGRAM_CHAT_ID']
-
-# FIX 4: Tightened keywords — removed noisy broad terms (admin, clerk, data entry)
-KEYWORDS = [
-    'accounts executive', 'accounts assistant', 'junior accountant',
-    'accountant trainee', 'tally operator', 'gst assistant', 'gst executive',
-    'tds assistant', 'billing executive', 'finance assistant', 'bookkeeper',
-    'back office finance', 'mis executive', 'accountant', 'tally', 'audit',
-]
-
-SEEN    = 'seen_jobs.json'
-TIMEOUT = 20
-DAYS    = 30
-
-HEAD = {
-    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36',
-    'Accept-Language': 'en-IN,en;q=0.9',
-}
-
-# FIX 3: Hyderabad-ONLY filter — removed other Indian cities from IN_KEYS
-IN_KEYS = [
-    'hyderabad', 'secunderabad', 'telangana',
-    'warangal', 'karimnagar', 'nizamabad', 'mahbubnagar',
-    'medak', 'nalgonda', 'khammam', 'india',
-]
-EX_KEYS = [
-    'remote', 'usa', 'us-', 'united states', 'uk-', 'united kingdom',
-    'europe', 'dubai', 'uae', 'canada', 'australia', 'germany', 'wfh',
-    'chennai', 'bangalore', 'bengaluru', 'mumbai', 'delhi', 'kolkata',
-    'pune', 'kochi', 'coimbatore',
-]
-
-def is_hyd(j):
-    h = ' ' + j.get('haystack', '') + ' '
-    if any(k in h for k in EX_KEYS):
-        return False
-    return any(k in h for k in IN_KEYS)
 
 def norm(j):
     j['title']    = j.get('title', '').strip()
@@ -52,6 +7,7 @@ def norm(j):
     j['haystack'] = j.get('haystack', f"{j['title']} {j['company']} {j['location']}").lower()
     return j
 
+
 def unique(js):
     d = {}
     for j in js:
@@ -59,6 +15,7 @@ def unique(js):
         if k:
             d.setdefault(k, j)
     return list(d.values())
+
 
 # FIX 2: Added retry logic for LinkedIn blocks (429/999)
 def safe_get(url, retries=3, delay=5):
@@ -74,6 +31,7 @@ def safe_get(url, retries=3, delay=5):
             print(f'Request error attempt {attempt+1}: {e}')
             time.sleep(delay)
     return None
+
 
 def fetch_linkedin():
     out = []
@@ -105,6 +63,7 @@ def fetch_linkedin():
                 'source':  'LinkedIn',
             }))
     return unique(out)
+
 
 def fetch_indeed():
     out = []
@@ -141,6 +100,7 @@ def fetch_indeed():
             }))
     return unique(out)
 
+
 # FIX 6: Retry logic on Telegram send failure
 def send(m, retries=3):
     for attempt in range(retries):
@@ -159,6 +119,7 @@ def send(m, retries=3):
         time.sleep(3)
     print('Telegram: all retries exhausted — alert lost')
 
+
 def main():
     # Scrape all sources
     allj = []
@@ -170,7 +131,9 @@ def main():
         except Exception as e:
             print(f.__name__, 'failed safely:', e)
 
+
     allj = unique(allj)
+
 
     # Load seen jobs
     seen = {}
@@ -180,9 +143,11 @@ def main():
     except (OSError, ValueError):
         pass
 
+
     now  = datetime.now(timezone.utc)
     cut  = now - timedelta(days=DAYS)
     alerts = []
+
 
     for j in allj:
         if not j.get('url'):
@@ -194,6 +159,7 @@ def main():
         if j['url'] in seen:
             continue
 
+
         # FIX 8: Only skip if posted date is valid AND old — include if date unknown
         posted = None
         try:
@@ -203,8 +169,10 @@ def main():
         if posted and posted < cut:
             continue
 
+
         alerts.append(j)
         seen[j['url']] = now.isoformat()
+
 
     # FIX 7: Write seen_jobs atomically to avoid partial writes
     tmp = SEEN + '.tmp'
@@ -218,37 +186,44 @@ def main():
         }, f, indent=2)
     os.replace(tmp, SEEN)
 
+
     if not alerts:
         print('No new matching jobs.')
         return
+
 
     # FIX 5: Removed hardcoded 12-alert cap — send all, notify if capped
     MAX_ALERTS = 20
     if len(alerts) > MAX_ALERTS:
         print(f'Warning: {len(alerts)} matches found — sending top {MAX_ALERTS}')
 
+
     chunks = []
-    cur = (f'📋 <b>NEW JOB ALERTS (Hyderabad Only)</b>' + BS + 'n'
-           f'📥 {len(alerts)} new match(es)' + BS + 'n' + BS + 'n')
+    cur = (f'📋 <b>NEW JOB ALERTS (Hyderabad Only)</b>\n'
+           f'📥 {len(alerts)} new match(es)\n\n')
+
 
     for j in alerts[:MAX_ALERTS]:
         p   = (' | Posted: ' + html.escape(j['posted'])) if j.get('posted') else ''
-        sal = (BS + 'n💰 ' + html.escape(j['salary'])) if j.get('salary') else ''
-        b   = (f"💼 <b>{html.escape(j['title'].title())}</b>" + BS + 'n'
-               f"🏢 {html.escape(j['company'])}" + BS + 'n'
-               f"📍 {html.escape(j['location'])}{p}{sal}" + BS + 'n'
-               f"🌐 {j.get('source', '')}" + BS + 'n'
-               f"🔗 <a href='{html.escape(j['url'], quote=True)}'>Apply Here</a>" + BS + 'n' + BS + 'n')
+        sal = ('\n💰 ' + html.escape(j['salary'])) if j.get('salary') else ''
+        b   = (f"💼 <b>{html.escape(j['title'].title())}</b>\n"
+               f"🏢 {html.escape(j['company'])}\n"
+               f"📍 {html.escape(j['location'])}{p}{sal}\n"
+               f"🌐 {j.get('source', '')}\n"
+               f"🔗 <a href='{html.escape(j['url'], quote=True)}'>Apply Here</a>\n\n")
         if len(cur) + len(b) > 3800:
             chunks.append(cur)
-            cur = '📋 <b>NEW JOB ALERTS (Hyderabad Only)</b>' + BS + 'n' + BS + 'n'
+            cur = '📋 <b>NEW JOB ALERTS (Hyderabad Only)</b>\n\n'
         cur += b
+
 
     chunks.append(cur)
     for c in chunks:
         send(c)
 
+
     print(f'Sent {min(MAX_ALERTS, len(alerts))} alerts')
+
 
 if __name__ == '__main__':
     main()
