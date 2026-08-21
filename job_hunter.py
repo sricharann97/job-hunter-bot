@@ -1,6 +1,6 @@
 import html, json, os, time, subprocess
 from datetime import datetime, timezone, timedelta
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urljoin
 import requests
 from bs4 import BeautifulSoup
 
@@ -21,8 +21,9 @@ TIMEOUT = 20
 DAYS    = 30
 
 HEAD = {
-    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Accept-Language': 'en-IN,en;q=0.9',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
 }
 
 IN_KEYS = [
@@ -107,10 +108,70 @@ def fetch_linkedin():
             }))
     return unique(out)
 
+def fetch_internshala():
+    out = []
+    u = 'https://internshala.com/jobs/accounting-jobs-in-hyderabad/'
+    r = safe_get(u)
+    if not r:
+        return []
+    s = BeautifulSoup(r.text, 'html.parser')
+    for c in s.select('div.individual_internship'):
+        t = c.select_one('h3.job-internship-name a') or c.select_one('.profile a')
+        co = c.select_one('.company-name a') or c.select_one('.company_name a')
+        lo = c.select_one('.location_names') or c.select_one('.location_link')
+        if not t:
+            continue
+        url = urljoin(u, t.get('href', ''))
+        out.append(norm({
+            'id': url,
+            'title': t.get_text(' ', strip=True),
+            'company': co.get_text(' ', strip=True) if co else 'Unknown',
+            'location': lo.get_text(' ', strip=True) if lo else 'Hyderabad',
+            'url': url,
+            'source': 'Internshala',
+            'haystack': c.get_text(' ', strip=True)
+        }))
+    return out
+
+def fetch_shine():
+    out = []
+    u = 'https://www.shine.com/job-search/accounting-jobs-in-hyderabad?q=accounting&l=hyderabad'
+    r = safe_get(u)
+    if not r:
+        return []
+    s = BeautifulSoup(r.text, 'html.parser')
+    # Shine uses different classes for their job cards
+    for c in s.select('.jobCard, [itemtype="http://schema.org/JobPosting"]'):
+        t = c.select_one('h2 a') or c.select_one('h2[itemprop="name"] a')
+        co = c.select_one('.jobCard_jobCard_cName__mYnIm') or c.select_one('div.jobCard_jobCard_cName__mYnIm span')
+        lo = c.select_one('.jobCard_locationIcon__s_Kk_') or c.select_one('div.jobCard_locationIcon__s_Kk_')
+        if not t:
+            continue
+        url = urljoin(u, t.get('href', ''))
+        out.append(norm({
+            'id': url,
+            'title': t.get_text(' ', strip=True),
+            'company': co.get_text(' ', strip=True) if co else 'Unknown',
+            'location': lo.get_text(' ', strip=True) if lo else 'Hyderabad',
+            'url': url,
+            'source': 'Shine',
+            'haystack': c.get_text(' ', strip=True)
+        }))
+    return out
+
+def fetch_naukri():
+    # Naukri usually requires JS, but we can try to extract from the static search page
+    # or rely on the user's Gmail alerts which are already monitored.
+    # For now, we'll keep it as a placeholder that logs the attempt.
+    print("Naukri scraping is limited; relying on Gmail alerts for Naukri jobs.")
+    return []
+
 def fetch_indeed():
+    # Indeed is geo-blocked on datacenter IPs.
     return []
 
 def run_mcp(server, tool, input_data):
+    """Helper to run MCP tools via CLI."""
     try:
         cmd = [
             'manus-mcp-cli', 'tool', 'call', tool,
@@ -129,13 +190,16 @@ def run_mcp(server, tool, input_data):
         return None
 
 def monitor_gmail():
+    """Scan Gmail for job-related updates."""
     if not os.path.exists('/usr/bin/manus-mcp-cli'):
         return []
+    
     print("Monitoring Gmail...")
-    query = "after:2026/08/20 (interview OR offer OR application OR recruiter OR hiring)"
+    query = "after:2026/08/20 (interview OR offer OR application OR recruiter OR hiring OR 'job alert')"
     results = run_mcp('gmail', 'gmail_search_messages', {"query": query})
     if not results or 'messages' not in results:
         return []
+    
     updates = []
     for msg in results['messages'][:10]:
         details = run_mcp('gmail', 'gmail_get_message', {"id": msg['id']})
@@ -149,8 +213,10 @@ def monitor_gmail():
     return updates
 
 def sync_database(jobs, updates):
+    """Sync new jobs and email updates to Notion and Google Sheets."""
     if not os.path.exists('/usr/bin/manus-mcp-cli'):
         return
+    
     print(f"Syncing {len(jobs)} jobs to Notion...")
     for j in jobs:
         props = {
@@ -165,11 +231,12 @@ def sync_database(jobs, updates):
             "parent_data_source_url": NOTION_DB_URL,
             "properties": props
         })
+
     if jobs:
         print("Updating Google Sheets...")
-        rows = [[j['title'], j['company'], j['location'], j['url'], "Not started", datetime.now().strftime('%Y-%m-%d')] for j in jobs]
+        rows = [[datetime.now().strftime('%Y-%m-%d'), j['title'], j['company'], j['location'], j['source'], "No", j['url'], "Not started", ""] for j in jobs]
         body = {"values": rows}
-        subprocess.run(['gws', 'sheets', '+append', SHEET_ID, 'Applications!A:F', '--input', json.dumps(body)])
+        subprocess.run(['gws', 'sheets', '+append', SHEET_ID, 'Applications!A:I', '--input', json.dumps(body)])
 
 def send(m, retries=3):
     if not TOKEN or not CHAT:
@@ -190,47 +257,76 @@ def send(m, retries=3):
         time.sleep(3)
 
 def main():
+    # 1. Scrape Jobs
     allj = []
-    for f in [fetch_linkedin, fetch_indeed]:
+    sources = [fetch_linkedin, fetch_internshala, fetch_shine, fetch_naukri, fetch_indeed]
+    for f in sources:
         try:
             j = f()
-            print(f.__name__, len(j))
+            print(f"{f.__name__}: found {len(j)} jobs")
             allj += j
         except Exception as e:
-            print(f.__name__, 'failed safely:', e)
+            print(f"{f.__name__} failed safely: {e}")
+
     allj = unique(allj)
+
+    # 2. Filter & Deduplicate
     seen = {}
     try:
         with open(SEEN, encoding='utf-8') as f:
             seen = json.load(f).get('seen', {})
     except (OSError, ValueError):
         pass
+
     now = datetime.now(timezone.utc)
     cut = now - timedelta(days=DAYS)
+    
+    # Clean up old seen jobs
+    seen = {k: v for k, v in seen.items() if datetime.fromisoformat(v) > cut}
+
     alerts = []
     for j in allj:
         if not j.get('url') or j['url'] in seen:
             continue
+        # Check keywords in title or haystack
         if not any(k in j.get('haystack', '') for k in KEYWORDS):
             continue
         if not is_hyd(j):
             continue
+        
         alerts.append(j)
         seen[j['url']] = now.isoformat()
+
+    # 3. Monitor Gmail
     email_updates = monitor_gmail()
     if email_updates:
         msg = "📧 <b>New Email Updates</b>\n\n"
         for u in email_updates:
             msg += f"From: {u['from']}\nSub: {u['subject']}\n\n"
         send(msg)
-    if alerts or email_updates:
+
+    # 4. Sync Database
+    if alerts:
         sync_database(alerts, email_updates)
+
+    # 5. Save State
     with open(SEEN, 'w', encoding='utf-8') as f:
         json.dump({'last_run_utc': now.isoformat(), 'seen': seen}, f, indent=2)
+
+    # 6. Send Alerts
     if alerts:
-        msg = f"📋 <b>NEW JOB ALERTS ({len(alerts)})</b>\n\n"
-        for j in alerts[:10]:
-            msg += f"💼 <b>{j['title']}</b>\n🏢 {j['company']}\n🔗 <a href='{j['url']}'>Apply</a>\n\n"
+        msg = f"📋 <b>DAILY JOB REPORT ({len(alerts)})</b>\n"
+        msg += f"<i>Sources: LinkedIn, Internshala, Shine, Gmail</i>\n\n"
+        for j in alerts[:15]: # Show top 15
+            msg += f"💼 <b>{j['title']}</b>\n🏢 {j['company']} ({j['source']})\n🔗 <a href='{j['url']}'>Apply</a>\n\n"
+        
+        if len(alerts) > 15:
+            msg += f"...and {len(alerts)-15} more jobs added to your tracker."
+            
         send(msg)
+    else:
+        # Send a heartbeat if no jobs found but Gmail was checked
+        send("✅ <b>System Check</b>: Job search complete. No new matches found in the last 3 hours.")
+
 if __name__ == '__main__':
     main()
