@@ -1,14 +1,14 @@
-import html, json, os, time, re
+import html, json, os, time, subprocess
 from datetime import datetime, timezone, timedelta
 from urllib.parse import quote_plus
 import requests
 from bs4 import BeautifulSoup
 
 # --- Config ---
-TOKEN = os.environ.get('TELEGRAM_TOKEN', '')
-CHAT  = os.environ.get('TELEGRAM_CHAT_ID', '')
+TOKEN = os.environ.get('TELEGRAM_TOKEN')
+CHAT  = os.environ.get('TELEGRAM_CHAT_ID')
 
-# Keywords for matching
+# Job Search Config
 KEYWORDS = [
     'accounts executive', 'accounts assistant', 'junior accountant',
     'accountant trainee', 'tally operator', 'gst assistant', 'gst executive',
@@ -16,8 +16,20 @@ KEYWORDS = [
     'back office finance', 'mis executive', 'accountant', 'tally', 'audit',
 ]
 
-# Location filters
-IN_KEYS = ['hyderabad', 'secunderabad', 'telangana', 'india']
+SEEN    = 'seen_jobs.json'
+TIMEOUT = 20
+DAYS    = 30
+
+HEAD = {
+    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36',
+    'Accept-Language': 'en-IN,en;q=0.9',
+}
+
+IN_KEYS = [
+    'hyderabad', 'secunderabad', 'telangana',
+    'warangal', 'karimnagar', 'nizamabad', 'mahbubnagar',
+    'medak', 'nalgonda', 'khammam', 'india',
+]
 EX_KEYS = [
     'remote', 'usa', 'us-', 'united states', 'uk-', 'united kingdom',
     'europe', 'dubai', 'uae', 'canada', 'australia', 'germany', 'wfh',
@@ -25,270 +37,200 @@ EX_KEYS = [
     'pune', 'kochi', 'coimbatore',
 ]
 
-SEEN_FILE = 'seen_jobs.json'
-TIMEOUT = 20
-DAYS_BACK = 30
+# Database Config
+NOTION_DB_URL = "collection://6bfb694d-4c86-4bde-b09a-56f25b0b1250"
+SHEET_ID = "1msxG0oXEsO_JSZJbC-QicRQBPEhNe0WF5hLMmVuK-sI"
 
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-    'Accept-Language': 'en-IN,en;q=0.9',
-}
+def is_hyd(j):
+    h = ' ' + j.get('haystack', '') + ' '
+    if any(k in h for k in EX_KEYS):
+        return False
+    return any(k in h for k in IN_KEYS)
 
-class JobBot:
-    def __init__(self):
-        self.seen_jobs = self.load_seen()
-        self.new_jobs = []
+def norm(j):
+    j['title']    = j.get('title', '').strip()
+    j['company']  = j.get('company', 'Unknown').strip()
+    j['location'] = j.get('location', 'Not specified').strip()
+    j['url']      = j.get('url', '').strip()
+    j['haystack'] = j.get('haystack', f"{j['title']} {j['company']} {j['location']}").lower()
+    return j
 
-    def load_seen(self):
+def unique(js):
+    d = {}
+    for j in js:
+        k = j.get('url') or j.get('id')
+        if k:
+            d.setdefault(k, j)
+    return list(d.values())
+
+def safe_get(url, retries=3, delay=5):
+    for attempt in range(retries):
         try:
-            if os.path.exists(SEEN_FILE):
-                with open(SEEN_FILE, 'r', encoding='utf-8') as f:
-                    return json.load(f).get('seen', {})
-        except Exception as e:
-            print(f"Error loading seen jobs: {e}")
-        return {}
+            r = requests.get(url, headers=HEAD, timeout=TIMEOUT)
+            if r.status_code == 200:
+                return r
+            print(f'HTTP {r.status_code} on attempt {attempt+1} — URL: {url[:80]}')
+            if r.status_code in (429, 999):
+                time.sleep(delay * (attempt + 1))
+        except requests.RequestException as e:
+            print(f'Request error attempt {attempt+1}: {e}')
+            time.sleep(delay)
+    return None
 
-    def save_seen(self):
-        now = datetime.now(timezone.utc)
-        # Keep jobs from the last 60 days to prevent duplicates but keep file size manageable
-        cutoff = (now - timedelta(days=60)).isoformat()
-        cleaned_seen = {u: t for u, t in self.seen_jobs.items() if t > cutoff}
-        
-        try:
-            tmp = SEEN_FILE + '.tmp'
-            with open(tmp, 'w', encoding='utf-8') as f:
-                json.dump({
-                    'last_run_utc': now.isoformat(),
-                    'seen': cleaned_seen
-                }, f, indent=2)
-            os.replace(tmp, SEEN_FILE)
-        except Exception as e:
-            print(f"Error saving seen jobs: {e}")
+def fetch_linkedin():
+    out = []
+    for q in ['accounts executive tally', 'junior accountant fresher', 'gst finance fresher']:
+        u = ('https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords='
+             + quote_plus(q) + '&location=Hyderabad%2C%20Telangana&f_TPR=r86400&start=0')
+        r = safe_get(u)
+        if not r:
+            continue
+        s = BeautifulSoup(r.text, 'html.parser')
+        for c in s.select('li'):
+            t  = c.select_one('h3.base-search-card__title')
+            a  = c.select_one('a.base-card__full-link')
+            if not t or not a:
+                continue
+            co  = c.select_one('h4.base-search-card__subtitle')
+            lo  = c.select_one('span.job-search-card__location')
+            dt  = c.select_one('time')
+            url = a.get('href', '').split('?')[0]
+            out.append(norm({
+                'id':      c.get('data-entity-urn') or url,
+                'title':   t.get_text(' ', strip=True),
+                'company': co.get_text(' ', strip=True) if co else 'Unknown',
+                'location':lo.get_text(' ', strip=True) if lo else 'Hyderabad',
+                'url':     url,
+                'posted':  dt.get('datetime', '')[:10] if dt else '',
+                'haystack':c.get_text(' ', strip=True),
+                'source':  'LinkedIn',
+            }))
+    return unique(out)
 
-    def normalize(self, job):
-        job['title'] = job.get('title', '').strip()
-        job['company'] = job.get('company', 'Unknown').strip()
-        job['location'] = job.get('location', 'Hyderabad').strip()
-        job['url'] = job.get('url', '').strip()
-        job['description'] = job.get('description', '').strip()
-        job['salary'] = job.get('salary', '').strip()
-        
-        # Create a haystack for keyword matching
-        job['haystack'] = f"{job['title']} {job['company']} {job['location']} {job['description']}".lower()
-        
-        # Create a unique key for deduplication beyond just URL
-        # Normalized company + Normalized title
-        clean_company = re.sub(r'[^a-z0-9]', '', job['company'].lower())
-        clean_title = re.sub(r'[^a-z0-9]', '', job['title'].lower())
-        job['dedupe_key'] = f"{clean_company}_{clean_title}"
-        
-        return job
+def fetch_indeed():
+    return []
 
-    def is_match(self, job):
-        # Check location
-        h = ' ' + job['haystack'] + ' '
-        if any(k in h for k in EX_KEYS):
-            # Special case: 'india' is in IN_KEYS but we want to exclude other cities
-            # Only allow if 'hyderabad' or 'secunderabad' is present
-            if not any(k in h for k in ['hyderabad', 'secunderabad']):
-                return False
-        
-        if not any(k in h for k in IN_KEYS):
-            return False
-
-        # Check keywords
-        if not any(k in h for k in KEYWORDS):
-            return False
-
-        # Check if already seen (by URL or dedupe_key)
-        if job['url'] in self.seen_jobs:
-            return False
-        
-        # Check dedupe_key in seen values (we store ISO dates as values)
-        # This is a bit slow but safer for re-posts
-        if any(job['dedupe_key'] in k for k in self.seen_jobs.keys()):
-            return False
-
-        return True
-
-    def safe_get(self, url, retries=3):
-        for i in range(retries):
-            try:
-                r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-                if r.status_code == 200:
-                    return r
-                if r.status_code == 403 and "not provide services in your region" in r.text:
-                    return "REGION_BLOCKED"
-                print(f"HTTP {r.status_code} for {url[:50]}")
-            except Exception as e:
-                print(f"Request error: {e}")
-            time.sleep(2 * (i + 1))
+def run_mcp(server, tool, input_data):
+    try:
+        cmd = [
+            'manus-mcp-cli', 'tool', 'call', tool,
+            '--server', server,
+            '--input', json.dumps(input_data)
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            lines = result.stdout.strip().split('\n')
+            for line in reversed(lines):
+                if line.startswith('{') or line.startswith('['):
+                    return json.loads(line)
+        return None
+    except Exception as e:
+        print(f"MCP Error ({tool}): {e}")
         return None
 
-    def fetch_linkedin(self):
-        print("Fetching LinkedIn...")
-        queries = ['accounts executive', 'junior accountant', 'tally gst']
-        count = 0
-        for q in queries:
-            url = f"https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords={quote_plus(q)}&location=Hyderabad%2C%20Telangana&f_TPR=r86400&start=0"
-            r = self.safe_get(url)
-            if not r or r == 'REGION_BLOCKED': continue
-            
-            soup = BeautifulSoup(r.text, 'html.parser')
-            for card in soup.select('li'):
-                try:
-                    title_el = card.select_one('h3.base-search-card__title')
-                    company_el = card.select_one('h4.base-search-card__subtitle')
-                    link_el = card.select_one('a.base-card__full-link')
-                    loc_el = card.select_one('span.job-search-card__location')
-                    date_el = card.select_one('time')
-                    
-                    if not title_el or not link_el: continue
-                    
-                    url = link_el.get('href', '').split('?')[0]
-                    job = self.normalize({
-                        'title': title_el.get_text(strip=True),
-                        'company': company_el.get_text(strip=True) if company_el else 'Unknown',
-                        'location': loc_el.get_text(strip=True) if loc_el else 'Hyderabad',
-                        'url': url,
-                        'posted': date_el.get('datetime', '') if date_el else '',
-                        'source': 'LinkedIn',
-                        'description': card.get_text(" ", strip=True)
-                    })
-                    
-                    if self.is_match(job):
-                        self.new_jobs.append(job)
-                        self.seen_jobs[job['url']] = datetime.now(timezone.utc).isoformat()
-                        count += 1
-                except Exception as e:
-                    print(f"Error parsing LinkedIn card: {e}")
-        print(f"LinkedIn: Found {count} new jobs.")
+def monitor_gmail():
+    if not os.path.exists('/usr/bin/manus-mcp-cli'):
+        return []
+    print("Monitoring Gmail...")
+    query = "after:2026/08/20 (interview OR offer OR application OR recruiter OR hiring)"
+    results = run_mcp('gmail', 'gmail_search_messages', {"query": query})
+    if not results or 'messages' not in results:
+        return []
+    updates = []
+    for msg in results['messages'][:10]:
+        details = run_mcp('gmail', 'gmail_get_message', {"id": msg['id']})
+        if details:
+            updates.append({
+                'subject': details.get('subject', 'No Subject'),
+                'from': details.get('from', 'Unknown'),
+                'snippet': details.get('snippet', ''),
+                'date': details.get('date', '')
+            })
+    return updates
 
-    def fetch_indeed(self):
-        print("Fetching Indeed...")
-        queries = ['accounts executive', 'junior accountant']
-        count = 0
-        for q in queries:
-            url = f"https://in.indeed.com/jobs?q={quote_plus(q)}&l=Hyderabad%2C+Telangana&sort=date"
-            r = self.safe_get(url)
-            
-            if r == 'REGION_BLOCKED':
-                print("Indeed SKIP: Region blocked (runner IP).")
-                return 
-            
-            if not r: continue
-            
-            import re
-            m = re.search(r'window\.mosaic\.providerData\["mosaic-provider-jobcards"\]=(\{.+?\});', r.text)
-            if m:
-                try:
-                    data = json.loads(m.group(1))
-                    results = data["metaData"]["mosaicProviderJobCardsModel"]["results"]
-                    for res in results:
-                        jk = res.get("jobkey") or ""
-                        job_url = f"https://in.indeed.com/viewjob?jk={jk}" if jk else res.get("link")
-                        if not job_url: continue
-                        
-                        job = self.normalize({
-                            'title': res.get("displayTitle") or res.get("title") or "",
-                            'company': res.get("company") or "Unknown",
-                            'location': res.get("formattedLocation") or "Hyderabad",
-                            'url': job_url,
-                            'salary': res.get("salarySnippet", {}).get("text", "") if isinstance(res.get("salarySnippet"), dict) else "",
-                            'source': 'Indeed',
-                            'description': res.get("snippet", "")
-                        })
-                        
-                        if self.is_match(job):
-                            self.new_jobs.append(job)
-                            self.seen_jobs[job['url']] = datetime.now(timezone.utc).isoformat()
-                            count += 1
-                except Exception as e:
-                    print(f"Indeed mosaic error: {e}")
-            
-            soup = BeautifulSoup(r.text, 'html.parser')
-            for card in soup.select('div.job_seen_beacon'):
-                try:
-                    title_el = card.select_one('h2.jobTitle a')
-                    if not title_el: continue
-                    
-                    jk = card.get('data-jk') or title_el.get('data-jk')
-                    job_url = f"https://in.indeed.com/viewjob?jk={jk}" if jk else title_el.get('href')
-                    if job_url and job_url.startswith('/'): job_url = "https://in.indeed.com" + job_url
-                    
-                    job = self.normalize({
-                        'title': title_el.get_text(strip=True),
-                        'company': card.select_one('.companyName').get_text(strip=True) if card.select_one('.companyName') else 'Unknown',
-                        'location': card.select_one('.companyLocation').get_text(strip=True) if card.select_one('.companyLocation') else 'Hyderabad',
-                        'url': job_url,
-                        'source': 'Indeed',
-                        'description': card.select_one('.job-snippet').get_text(strip=True) if card.select_one('.job-snippet') else ''
-                    })
-                    
-                    if self.is_match(job):
-                        self.new_jobs.append(job)
-                        self.seen_jobs[job['url']] = datetime.now(timezone.utc).isoformat()
-                        count += 1
-                except Exception as e:
-                    pass
-        print(f"Indeed: Found {count} new jobs.")
-
-    def send_telegram(self):
-        if not self.new_jobs:
-            print("No new jobs to alert.")
-            return
-
-        print(f"Sending {len(self.new_jobs)} alerts to Telegram...")
-        self.new_jobs.sort(key=lambda x: x['source'])
-        
-        message = f"📋 <b>NEW JOB ALERTS (Hyderabad)</b>\n"
-        message += f"Found {len(self.new_jobs)} new matching roles.\n\n"
-        
-        for i, job in enumerate(self.new_jobs[:15]):
-            job_str = (f"💼 <b>{html.escape(job['title'])}</b>\n"
-                       f"🏢 {html.escape(job['company'])}\n"
-                       f"📍 {html.escape(job['location'])}\n")
-            if job['salary']:
-                job_str += f"💰 {html.escape(job['salary'])}\n"
-            job_str += (f"🌐 {job['source']}\n"
-                        f"🔗 <a href='{job['url']}'>View & Apply</a>\n\n")
-            
-            if len(message) + len(job_str) > 4000:
-                self._post_to_telegram(message)
-                message = "📋 <b>NEW JOB ALERTS (Cont.)</b>\n\n"
-            
-            message += job_str
-            
-        if message:
-            self._post_to_telegram(message)
-            
-        if len(self.new_jobs) > 15:
-            self._post_to_telegram(f"<i>...and {len(self.new_jobs) - 15} more roles found. Check the tracker for full list.</i>")
-
-    def _post_to_telegram(self, text):
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        payload = {
-            'chat_id': CHAT,
-            'text': text,
-            'parse_mode': 'HTML',
-            'disable_web_page_preview': True
+def sync_database(jobs, updates):
+    if not os.path.exists('/usr/bin/manus-mcp-cli'):
+        return
+    print(f"Syncing {len(jobs)} jobs to Notion...")
+    for j in jobs:
+        props = {
+            "Job Title": j['title'],
+            "Company": j['company'],
+            "Location": j['location'],
+            "URL": j['url'],
+            "Status": "Not started",
+            "date:Date Found:start": datetime.now().strftime('%Y-%m-%d')
         }
-        try:
-            r = requests.post(url, json=payload, timeout=TIMEOUT)
-            if r.status_code != 200:
-                print(f"Telegram error: {r.text}")
-        except Exception as e:
-            print(f"Telegram request failed: {e}")
+        run_mcp('notion', 'notion-create-page', {
+            "parent_data_source_url": NOTION_DB_URL,
+            "properties": props
+        })
+    if jobs:
+        print("Updating Google Sheets...")
+        rows = [[j['title'], j['company'], j['location'], j['url'], "Not started", datetime.now().strftime('%Y-%m-%d')] for j in jobs]
+        body = {"values": rows}
+        subprocess.run(['gws', 'sheets', '+append', SHEET_ID, 'Applications!A:F', '--input', json.dumps(body)])
 
-    def run(self):
-        self.fetch_linkedin()
-        self.fetch_indeed()
-        self.send_telegram()
-        self.save_seen()
-
-if __name__ == "__main__":
+def send(m, retries=3):
     if not TOKEN or not CHAT:
-        print("Error: TELEGRAM_TOKEN or TELEGRAM_CHAT_ID not set.")
-    else:
-        bot = JobBot()
-        bot.run()
+        print("Telegram config missing, skipping alert.")
+        return
+    for attempt in range(retries):
+        try:
+            r = requests.post(
+                f'https://api.telegram.org/bot{TOKEN}/sendMessage',
+                json={'chat_id': CHAT, 'text': m, 'parse_mode': 'HTML'},
+                timeout=15,
+            )
+            if r.status_code == 200:
+                return
+            print(f'Telegram failed attempt {attempt+1}: {r.text}')
+        except requests.RequestException as e:
+            print(f'Telegram error attempt {attempt+1}: {e}')
+        time.sleep(3)
+
+def main():
+    allj = []
+    for f in [fetch_linkedin, fetch_indeed]:
+        try:
+            j = f()
+            print(f.__name__, len(j))
+            allj += j
+        except Exception as e:
+            print(f.__name__, 'failed safely:', e)
+    allj = unique(allj)
+    seen = {}
+    try:
+        with open(SEEN, encoding='utf-8') as f:
+            seen = json.load(f).get('seen', {})
+    except (OSError, ValueError):
+        pass
+    now = datetime.now(timezone.utc)
+    cut = now - timedelta(days=DAYS)
+    alerts = []
+    for j in allj:
+        if not j.get('url') or j['url'] in seen:
+            continue
+        if not any(k in j.get('haystack', '') for k in KEYWORDS):
+            continue
+        if not is_hyd(j):
+            continue
+        alerts.append(j)
+        seen[j['url']] = now.isoformat()
+    email_updates = monitor_gmail()
+    if email_updates:
+        msg = "📧 <b>New Email Updates</b>\n\n"
+        for u in email_updates:
+            msg += f"From: {u['from']}\nSub: {u['subject']}\n\n"
+        send(msg)
+    if alerts or email_updates:
+        sync_database(alerts, email_updates)
+    with open(SEEN, 'w', encoding='utf-8') as f:
+        json.dump({'last_run_utc': now.isoformat(), 'seen': seen}, f, indent=2)
+    if alerts:
+        msg = f"📋 <b>NEW JOB ALERTS ({len(alerts)})</b>\n\n"
+        for j in alerts[:10]:
+            msg += f"💼 <b>{j['title']}</b>\n🏢 {j['company']}\n🔗 <a href='{j['url']}'>Apply</a>\n\n"
+        send(msg)
+if __name__ == '__main__':
+    main()
