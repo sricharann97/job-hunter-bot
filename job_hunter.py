@@ -140,7 +140,6 @@ def fetch_shine():
     if not r:
         return []
     s = BeautifulSoup(r.text, 'html.parser')
-    # Shine uses different classes for their job cards
     for c in s.select('.jobCard, [itemtype="http://schema.org/JobPosting"]'):
         t = c.select_one('h2 a') or c.select_one('h2[itemprop="name"] a')
         co = c.select_one('.jobCard_jobCard_cName__mYnIm') or c.select_one('div.jobCard_jobCard_cName__mYnIm span')
@@ -158,17 +157,6 @@ def fetch_shine():
             'haystack': c.get_text(' ', strip=True)
         }))
     return out
-
-def fetch_naukri():
-    # Naukri usually requires JS, but we can try to extract from the static search page
-    # or rely on the user's Gmail alerts which are already monitored.
-    # For now, we'll keep it as a placeholder that logs the attempt.
-    print("Naukri scraping is limited; relying on Gmail alerts for Naukri jobs.")
-    return []
-
-def fetch_indeed():
-    # Indeed is geo-blocked on datacenter IPs.
-    return []
 
 def run_mcp(server, tool, input_data):
     """Helper to run MCP tools via CLI."""
@@ -190,25 +178,36 @@ def run_mcp(server, tool, input_data):
         return None
 
 def monitor_gmail():
-    """Scan Gmail for job-related updates."""
+    """Enhanced Gmail monitoring for recruiter replies and interview invites."""
     if not os.path.exists('/usr/bin/manus-mcp-cli'):
         return []
     
-    print("Monitoring Gmail...")
-    query = "after:2026/08/20 (interview OR offer OR application OR recruiter OR hiring OR 'job alert')"
-    results = run_mcp('gmail', 'gmail_search_messages', {"query": query})
+    print("Monitoring Gmail for recruiter responses...")
+    query = "after:2026/08/21 (shortlisted OR interview OR invite OR congratulations OR offer OR hiring OR 'job alert')"
+    results = run_mcp('gmail', 'gmail_search_messages', {"q": query})
     if not results or 'messages' not in results:
         return []
     
     updates = []
-    for msg in results['messages'][:10]:
-        details = run_mcp('gmail', 'gmail_get_message', {"id": msg['id']})
-        if details:
+    for msg in results['messages'][:15]:
+        thread = run_mcp('gmail', 'gmail_read_threads', {"thread_ids": [msg['threadId']]})
+        if thread and 'result' in thread and thread['result']:
+            m = thread['result'][0]['messages'][-1]
+            
+            subject = m.get('pickedHeaders', {}).get('subject', 'No Subject')
+            sender = m.get('pickedHeaders', {}).get('from', 'Unknown')
+            snippet = m.get('snippet', '')
+            
+            priority = False
+            if any(k in (subject + snippet).lower() for k in ['shortlisted', 'interview', 'invite', 'congratulations']):
+                priority = True
+            
             updates.append({
-                'subject': details.get('subject', 'No Subject'),
-                'from': details.get('from', 'Unknown'),
-                'snippet': details.get('snippet', ''),
-                'date': details.get('date', '')
+                'subject': subject,
+                'from': sender,
+                'snippet': snippet,
+                'priority': priority,
+                'thread_id': msg['threadId']
             })
     return updates
 
@@ -234,7 +233,7 @@ def sync_database(jobs, updates):
 
     if jobs:
         print("Updating Google Sheets...")
-        rows = [[datetime.now().strftime('%Y-%m-%d'), j['title'], j['company'], j['location'], j['source'], "No", j['url'], "Not started", ""] for j in jobs]
+        rows = [[datetime.now().strftime('%Y-%m-%d'), j['title'], j['company'], j['location'], j['source'], "No", j['url'], "Not started", ""]] for j in jobs]
         body = {"values": rows}
         subprocess.run(['gws', 'sheets', '+append', SHEET_ID, 'Applications!A:I', '--input', json.dumps(body)])
 
@@ -259,7 +258,7 @@ def send(m, retries=3):
 def main():
     # 1. Scrape Jobs
     allj = []
-    sources = [fetch_linkedin, fetch_internshala, fetch_shine, fetch_naukri, fetch_indeed]
+    sources = [fetch_linkedin, fetch_internshala, fetch_shine]
     for f in sources:
         try:
             j = f()
@@ -280,26 +279,33 @@ def main():
 
     now = datetime.now(timezone.utc)
     cut = now - timedelta(days=DAYS)
-    
-    # Clean up old seen jobs
     seen = {k: v for k, v in seen.items() if datetime.fromisoformat(v) > cut}
 
     alerts = []
     for j in allj:
         if not j.get('url') or j['url'] in seen:
             continue
-        # Check keywords in title or haystack
         if not any(k in j.get('haystack', '') for k in KEYWORDS):
             continue
         if not is_hyd(j):
             continue
-        
         alerts.append(j)
         seen[j['url']] = now.isoformat()
 
-    # 3. Monitor Gmail
+    # 3. Monitor Gmail & Alert Priority
     email_updates = monitor_gmail()
-    if email_updates:
+    priority_alerts = [u for u in email_updates if u['priority']]
+    
+    if priority_alerts:
+        msg = "🚨 <b>URGENT: RECRUITER RESPONSE</b> 🚨\n\n"
+        for u in priority_alerts:
+            msg += f"<b>From:</b> {u['from']}\n"
+            msg += f"<b>Subject:</b> {u['subject']}\n"
+            msg += f"<b>Snippet:</b> {u['snippet'][:150]}...\n\n"
+            msg += "<i>A high-priority recruiter response was detected!</i>\n\n"
+        send(msg)
+        
+    elif email_updates:
         msg = "📧 <b>New Email Updates</b>\n\n"
         for u in email_updates:
             msg += f"From: {u['from']}\nSub: {u['subject']}\n\n"
@@ -313,20 +319,15 @@ def main():
     with open(SEEN, 'w', encoding='utf-8') as f:
         json.dump({'last_run_utc': now.isoformat(), 'seen': seen}, f, indent=2)
 
-    # 6. Send Alerts
+    # 6. Send Daily Report
     if alerts:
         msg = f"📋 <b>DAILY JOB REPORT ({len(alerts)})</b>\n"
         msg += f"<i>Sources: LinkedIn, Internshala, Shine, Gmail</i>\n\n"
-        for j in alerts[:15]: # Show top 15
+        for j in alerts[:15]:
             msg += f"💼 <b>{j['title']}</b>\n🏢 {j['company']} ({j['source']})\n🔗 <a href='{j['url']}'>Apply</a>\n\n"
-        
-        if len(alerts) > 15:
-            msg += f"...and {len(alerts)-15} more jobs added to your tracker."
-            
         send(msg)
-    else:
-        # Send a heartbeat if no jobs found but Gmail was checked
-        send("✅ <b>System Check</b>: Job search complete. No new matches found in the last 3 hours.")
+    elif not priority_alerts:
+        send("✅ <b>System Check</b>: Search complete. No new matches found in the last 3 hours.")
 
 if __name__ == '__main__':
     main()
