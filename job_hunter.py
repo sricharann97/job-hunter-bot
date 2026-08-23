@@ -234,7 +234,25 @@ def send(m):
                       json={'chat_id': CHAT, 'text': m, 'parse_mode': 'HTML'}, timeout=15)
     except: pass
 
+def check_maintenance():
+    # SGT = UTC + 8
+    now_utc = datetime.now(timezone.utc)
+    maint_start = datetime(2026, 8, 23, 0, 0, tzinfo=timezone.utc) # 8:00 AM SGT
+    maint_end = datetime(2026, 8, 24, 23, 59, tzinfo=timezone.utc) # 7:59 AM SGT on 25th is roughly midnight UTC on 24th
+    
+    if maint_start <= now_utc <= maint_end:
+        msg = ("⚠️ <b>MANUS MAINTENANCE ALERT</b>\n\n"
+               "The Manus platform is currently undergoing scheduled updates (Aug 23 - Aug 25).\n\n"
+               "🔹 <b>Status:</b> Manus Web/App likely offline.\n"
+               "🔹 <b>Your Bot:</b> GitHub automation is ACTIVE and running normally.\n"
+               "🔹 <b>Interview:</b> Maple Tax Consulting tomorrow at 2:00 PM IST.\n\n"
+               "<i>I will continue to send you job alerts every 3 hours as usual.</i>")
+        send(msg)
+
 def main():
+    # Check for maintenance first
+    check_maintenance()
+    
     try:
         with open('profile.json', 'r') as f:
             profile_data = json.load(f)
