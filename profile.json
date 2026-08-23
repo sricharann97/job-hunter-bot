@@ -1,0 +1,34 @@
+{
+  "target_roles": [
+    "Accounts Executive",
+    "Junior Accountant",
+    "Accounts Assistant",
+    "Accountant Trainee",
+    "Tally Operator",
+    "GST Assistant",
+    "GST Executive",
+    "TDS Assistant",
+    "Billing Executive",
+    "Finance Assistant",
+    "Bookkeeper",
+    "Accountant",
+    "Audit Assistant"
+  ],
+  "skills": [
+    "Tally ERP9",
+    "GST",
+    "TDS",
+    "MS-Office",
+    "Accounting",
+    "Finance",
+    "Taxation",
+    "Tally"
+  ],
+  "preferred_locations": [
+    "Hyderabad",
+    "Secunderabad",
+    "Telangana",
+    "India"
+  ],
+  "minimum_experience_years": 0
+}
