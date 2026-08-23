@@ -1,4 +1,4 @@
-import html, json, os, time, subprocess, re
+import html, json, os, time, re
 from datetime import datetime, timezone, timedelta
 from urllib.parse import quote_plus, urljoin
 import requests
@@ -39,10 +39,6 @@ EX_KEYS = [
     'chennai', 'bangalore', 'bengaluru', 'mumbai', 'delhi', 'kolkata',
     'pune', 'kochi', 'coimbatore',
 ]
-
-# Database Config
-NOTION_DB_URL = "collection://6bfb694d-4c86-4bde-b09a-56f25b0b1250"
-SHEET_ID = "1msxG0oXEsO_JSZJbC-QicRQBPEhNe0WF5hLMmVuK-sI"
 
 # --- Scoring Logic ---
 @dataclass(frozen=True)
@@ -106,7 +102,8 @@ def score_job(job: Job, profile: CandidateProfile) -> dict[str, Any]:
     # Experience Match (10 points)
     exp_years = [float(v) for v in re.findall(r"(\d+(?:\.\d+)?)\s*\+?\s*years?", normalize(job.description))]
     required_years = min(exp_years) if exp_years else 0
-    exp_points = 10.0 if profile.minimum_experience_years >= required_years else 5.0 if not exp_years else 0.0
+    # profile.minimum_experience_years is 0 for fresher
+    exp_points = 10.0 if (profile.minimum_experience_years or 0) >= required_years else 5.0 if not exp_years else 0.0
     components.append(ScoreComponent("experience_match", exp_points, 10.0, 
         "Experience met" if exp_points == 10.0 else "Review needed" if exp_points == 5.0 else "Experience gap", [f"Required: {required_years}, Have: {profile.minimum_experience_years}"]))
     
@@ -230,23 +227,6 @@ def fetch_shine():
         }))
     return out
 
-# --- MCP & Communication ---
-def run_mcp(server, tool, input_data):
-    try:
-        cmd = ['manus-mcp-cli', 'tool', 'call', tool, '--server', server, '--input', JSON.stringify(input_data)]
-        result = subprocess.run(cmd, capture_output=true, text=true)
-        if (result.returncode == 0) {
-            const lines = result.stdout.trim().split('\n');
-            for (let i = lines.length - 1; i >= 0; i--) {
-                if (lines[i].startsWith('{') || lines[i].startsWith('[')) {
-                    return JSON.parse(lines[i]);
-                }
-            }
-        }
-    } catch (e) {}
-    return null;
-}
-
 def send(m):
     if not TOKEN or not CHAT: return
     try:
@@ -254,41 +234,36 @@ def send(m):
                       json={'chat_id': CHAT, 'text': m, 'parse_mode': 'HTML'}, timeout=15)
     except: pass
 
-def monitor_gmail():
-    print("Monitoring Gmail for recruiter activity...")
-    query = "after:2026/08/20 (interview OR shortlisted OR invite OR offer OR recruiter OR hiring OR 'job alert')"
-    results = run_mcp('gmail', 'gmail_search_messages', {"query": query})
-    if not results or 'messages' not in results: return []
-    
-    updates = []
-    for msg in results['messages'][:10]:
-        details = run_mcp('gmail', 'gmail_get_message', {"id": msg['id']})
-        if details:
-            body = details.get('snippet', '').lower()
-            priority = any(k in body for k in ['shortlisted', 'interview', 'congratulations', 'invite'])
-            updates.append({
-                'subject': details.get('subject', 'No Subject'),
-                'from': details.get('from', 'Unknown'),
-                'priority': priority,
-                'snippet': details.get('snippet', '')
-            })
-    return updates
-
 def main():
-    profile = CandidateProfile(**json.load(open('profile.json')))
-    
+    try:
+        with open('profile.json', 'r') as f:
+            profile_data = json.load(f)
+            profile = CandidateProfile(**profile_data)
+    except Exception as e:
+        print(f"Error loading profile.json: {e}")
+        return
+
     # 1. Scrape Jobs
     allj = []
     for f in [fetch_linkedin, fetch_internshala, fetch_shine]:
-        try: allj += f()
-        except: pass
+        try: 
+            jobs = f()
+            print(f"Fetched {len(jobs)} from {f.__name__}")
+            allj += jobs
+        except Exception as e:
+            print(f"Error in {f.__name__}: {e}")
     allj = unique(allj)
+    print(f"Total unique jobs found: {len(allj)}")
     
     # 2. Filter & Score
-    seen = {}
-    try: seen = json.load(open(SEEN)).get('seen', {})
-    except: pass
+    seen_data = {'last_run_utc': '', 'seen': {}}
+    if os.path.exists(SEEN):
+        try:
+            with open(SEEN, 'r') as f:
+                seen_data = json.load(f)
+        except: pass
     
+    seen = seen_data.get('seen', {})
     scored_jobs = []
     for j in allj:
         if not j.get('url') or j['url'] in seen: continue
@@ -302,49 +277,22 @@ def main():
             scored_jobs.append(j)
             seen[j['url']] = datetime.now(timezone.utc).isoformat()
 
-    # 3. Gmail & Priority Alerts
-    email_updates = monitor_gmail()
-    for u in email_updates:
-        if u['priority']:
-            send(f"🚨 <b>PRIORITY RECRUITER ALERT</b>\n\nFrom: {u['from']}\nSub: {u['subject']}\n\n<i>{u['snippet']}</i>")
-        elif 'job alert' in u['subject'].lower():
-            pass # Handle regular alerts in summary
-
-    # 4. Database Sync
+    # 3. Final Telegram Report
     if scored_jobs:
         scored_jobs.sort(key=lambda x: x['score'], reverse=True)
-        for j in scored_jobs:
-            run_mcp('notion', 'notion-create-page', {
-                "parent_data_source_url": NOTION_DB_URL,
-                "properties": {
-                    "Job Title": j['title'], "Company": j['company'], "Location": j['location'],
-                    "URL": j['url'], "Status": "Not started", "Score": str(j['score'])
-                }
-            })
-        
-        # Google Sheets Sync
-        rows = [[datetime.now().strftime('%Y-%m-%d'), j['title'], j['company'], j['location'], j['source'], str(j['score']), j['url'], "Not started", ""]]
-        subprocess.run(['gws', 'sheets', '+append', SHEET_ID, 'Applications!A:I', '--input', json.dumps({"values": rows})])
-
-    # 5. Auto-Apply Trigger
-    if scored_jobs:
-        print("Triggering Auto-Apply Playbook...")
-        subprocess.run(['manus-config', 'schedule', 'run', 'YQ7cyicc4jtHrfF4rPx'])
-
-    # 6. Final Telegram Report
-    if scored_jobs:
-        msg = f"📋 <b>DAILY JOB REPORT ({len(scored_jobs)})</b>\n"
-        msg += f"<i>AI Scored & Deduplicated</i>\n\n"
+        msg = f"📋 <b>JOB ALERT REPORT ({len(scored_jobs)})</b>\n"
+        msg += f"<i>Hyderabad Accounting - Scored & Filtered</i>\n\n"
         for j in scored_jobs[:10]:
-            msg += f"⭐ <b>{j['score']}</b> | <b>{j['title']}</b>\n🏢 {j['company']} ({j['source']})\n🔗 <a href='{j['url']}'>Apply</a>\n\n"
+            msg += f"⭐ <b>{j['score']}</b> | <b>{j['title']}</b>\n🏢 {j['company']} ({j['source']})\n🔗 <a href='{j['url']}'>View Job</a>\n\n"
         send(msg)
-    elif email_updates:
-        send("✅ <b>System Check</b>: No new jobs, but monitored Gmail for updates.")
+        print(f"Sent alert for {len(scored_jobs)} jobs.")
     else:
-        send("✅ <b>System Check</b>: Job search complete. No new matches found.")
+        print("No new matching jobs found.")
 
+    seen_data['last_run_utc'] = datetime.now(timezone.utc).isoformat()
+    seen_data['seen'] = seen
     with open(SEEN, 'w') as f:
-        json.dump({'last_run_utc': datetime.now(timezone.utc).isoformat(), 'seen': seen}, f, indent=2)
+        json.dump(seen_data, f, indent=2)
 
 if __name__ == '__main__':
     main()
