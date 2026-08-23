@@ -1,8 +1,10 @@
-import html, json, os, time, subprocess
+import html, json, os, time, subprocess, re
 from datetime import datetime, timezone, timedelta
 from urllib.parse import quote_plus, urljoin
 import requests
 from bs4 import BeautifulSoup
+from dataclasses import asdict, dataclass
+from typing import Any
 
 # --- Config ---
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
@@ -42,6 +44,86 @@ EX_KEYS = [
 NOTION_DB_URL = "collection://6bfb694d-4c86-4bde-b09a-56f25b0b1250"
 SHEET_ID = "1msxG0oXEsO_JSZJbC-QicRQBPEhNe0WF5hLMmVuK-sI"
 
+# --- Scoring Logic ---
+@dataclass(frozen=True)
+class CandidateProfile:
+    target_roles: list[str]
+    skills: list[str]
+    preferred_locations: list[str]
+    minimum_experience_years: float | None = None
+
+@dataclass(frozen=True)
+class Job:
+    title: str
+    description: str
+    location: str = ""
+    posted_at: str | None = None
+    url: str | None = None
+
+@dataclass(frozen=True)
+class ScoreComponent:
+    name: str
+    points: float
+    max_points: float
+    explanation: str
+    evidence: list[str]
+
+def normalize(text: str) -> str:
+    return re.sub(r"\s+", " ", text.lower()).strip()
+
+def find_phrase_matches(haystack: str, phrases: list[str]) -> list[str]:
+    normalized = normalize(haystack)
+    matches: list[str] = []
+    for phrase in phrases:
+        cleaned = normalize(phrase)
+        if cleaned and re.search(rf"(?<!\w){re.escape(cleaned)}(?!\w)", normalized):
+            matches.append(phrase)
+    return matches
+
+def score_job(job: Job, profile: CandidateProfile) -> dict[str, Any]:
+    components = []
+    
+    # Role Match (30 points)
+    role_matches = find_phrase_matches(job.title, profile.target_roles)
+    role_points = 30.0 if role_matches else 0.0
+    components.append(ScoreComponent("role_match", role_points, 30.0, 
+        "Title matches target role" if role_matches else "Title mismatch", role_matches))
+    
+    # Skill Match (35 points)
+    skill_matches = find_phrase_matches(f"{job.title}\n{job.description}", profile.skills)
+    coverage = len(skill_matches) / len(profile.skills) if profile.skills else 0.0
+    skill_points = round(35.0 * coverage, 1)
+    components.append(ScoreComponent("skill_match", skill_points, 35.0, 
+        f"Matched {len(skill_matches)} skills", skill_matches))
+    
+    # Location Match (15 points)
+    loc_matches = find_phrase_matches(job.location, profile.preferred_locations)
+    remote_match = "remote" in normalize(job.location) or "hybrid" in normalize(job.location)
+    loc_points = 15.0 if loc_matches else 10.0 if remote_match else 0.0
+    components.append(ScoreComponent("location_match", loc_points, 15.0, 
+        "Location match" if loc_matches else "Remote/Hybrid" if remote_match else "Location mismatch", loc_matches or [job.location]))
+    
+    # Experience Match (10 points)
+    exp_years = [float(v) for v in re.findall(r"(\d+(?:\.\d+)?)\s*\+?\s*years?", normalize(job.description))]
+    required_years = min(exp_years) if exp_years else 0
+    exp_points = 10.0 if profile.minimum_experience_years >= required_years else 5.0 if not exp_years else 0.0
+    components.append(ScoreComponent("experience_match", exp_points, 10.0, 
+        "Experience met" if exp_points == 10.0 else "Review needed" if exp_points == 5.0 else "Experience gap", [f"Required: {required_years}, Have: {profile.minimum_experience_years}"]))
+    
+    # Freshness (10 points)
+    fresh_points = 10.0 
+    components.append(ScoreComponent("freshness", fresh_points, 10.0, "New listing", []))
+    
+    total = round(sum(c.points for c in components), 1)
+    decision = "high_priority_review" if total >= 75 else "review" if total >= 50 else "low_priority"
+    
+    return {
+        "score": total,
+        "decision": decision,
+        "components": [asdict(c) for c in components]
+    }
+
+# --- Scraping Functions ---
 def is_hyd(j):
     h = ' ' + j.get('haystack', '') + ' '
     if any(k in h for k in EX_KEYS):
@@ -70,11 +152,9 @@ def safe_get(url, retries=3, delay=5):
             r = requests.get(url, headers=HEAD, timeout=TIMEOUT)
             if r.status_code == 200:
                 return r
-            print(f'HTTP {r.status_code} on attempt {attempt+1} — URL: {url[:80]}')
             if r.status_code in (429, 999):
                 time.sleep(delay * (attempt + 1))
-        except requests.RequestException as e:
-            print(f'Request error attempt {attempt+1}: {e}')
+        except requests.RequestException:
             time.sleep(delay)
     return None
 
@@ -84,27 +164,23 @@ def fetch_linkedin():
         u = ('https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords='
              + quote_plus(q) + '&location=Hyderabad%2C%20Telangana&f_TPR=r86400&start=0')
         r = safe_get(u)
-        if not r:
-            continue
+        if not r: continue
         s = BeautifulSoup(r.text, 'html.parser')
         for c in s.select('li'):
-            t  = c.select_one('h3.base-search-card__title')
-            a  = c.select_one('a.base-card__full-link')
-            if not t or not a:
-                continue
-            co  = c.select_one('h4.base-search-card__subtitle')
-            lo  = c.select_one('span.job-search-card__location')
-            dt  = c.select_one('time')
+            t = c.select_one('h3.base-search-card__title')
+            a = c.select_one('a.base-card__full-link')
+            if not t or not a: continue
+            co = c.select_one('h4.base-search-card__subtitle')
+            lo = c.select_one('span.job-search-card__location')
             url = a.get('href', '').split('?')[0]
             out.append(norm({
-                'id':      c.get('data-entity-urn') or url,
-                'title':   t.get_text(' ', strip=True),
+                'id': url,
+                'title': t.get_text(' ', strip=True),
                 'company': co.get_text(' ', strip=True) if co else 'Unknown',
-                'location':lo.get_text(' ', strip=True) if lo else 'Hyderabad',
-                'url':     url,
-                'posted':  dt.get('datetime', '')[:10] if dt else '',
-                'haystack':c.get_text(' ', strip=True),
-                'source':  'LinkedIn',
+                'location': lo.get_text(' ', strip=True) if lo else 'Hyderabad',
+                'url': url,
+                'source': 'LinkedIn',
+                'haystack': c.get_text(' ', strip=True)
             }))
     return unique(out)
 
@@ -112,15 +188,13 @@ def fetch_internshala():
     out = []
     u = 'https://internshala.com/jobs/accounting-jobs-in-hyderabad/'
     r = safe_get(u)
-    if not r:
-        return []
+    if not r: return []
     s = BeautifulSoup(r.text, 'html.parser')
     for c in s.select('div.individual_internship'):
         t = c.select_one('h3.job-internship-name a') or c.select_one('.profile a')
         co = c.select_one('.company-name a') or c.select_one('.company_name a')
         lo = c.select_one('.location_names') or c.select_one('.location_link')
-        if not t:
-            continue
+        if not t: continue
         url = urljoin(u, t.get('href', ''))
         out.append(norm({
             'id': url,
@@ -137,15 +211,13 @@ def fetch_shine():
     out = []
     u = 'https://www.shine.com/job-search/accounting-jobs-in-hyderabad?q=accounting&l=hyderabad'
     r = safe_get(u)
-    if not r:
-        return []
+    if not r: return []
     s = BeautifulSoup(r.text, 'html.parser')
     for c in s.select('.jobCard, [itemtype="http://schema.org/JobPosting"]'):
         t = c.select_one('h2 a') or c.select_one('h2[itemprop="name"] a')
         co = c.select_one('.jobCard_jobCard_cName__mYnIm') or c.select_one('div.jobCard_jobCard_cName__mYnIm span')
         lo = c.select_one('.jobCard_locationIcon__s_Kk_') or c.select_one('div.jobCard_locationIcon__s_Kk_')
-        if not t:
-            continue
+        if not t: continue
         url = urljoin(u, t.get('href', ''))
         out.append(norm({
             'id': url,
@@ -158,176 +230,121 @@ def fetch_shine():
         }))
     return out
 
+# --- MCP & Communication ---
 def run_mcp(server, tool, input_data):
-    """Helper to run MCP tools via CLI."""
     try:
-        cmd = [
-            'manus-mcp-cli', 'tool', 'call', tool,
-            '--server', server,
-            '--input', json.dumps(input_data)
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode == 0:
-            lines = result.stdout.strip().split('\n')
-            for line in reversed(lines):
-                if line.startswith('{') or line.startswith('['):
-                    return json.loads(line)
-        return None
-    except Exception as e:
-        print(f"MCP Error ({tool}): {e}")
-        return None
+        cmd = ['manus-mcp-cli', 'tool', 'call', tool, '--server', server, '--input', JSON.stringify(input_data)]
+        result = subprocess.run(cmd, capture_output=true, text=true)
+        if (result.returncode == 0) {
+            const lines = result.stdout.trim().split('\n');
+            for (let i = lines.length - 1; i >= 0; i--) {
+                if (lines[i].startsWith('{') || lines[i].startsWith('[')) {
+                    return JSON.parse(lines[i]);
+                }
+            }
+        }
+    } catch (e) {}
+    return null;
+}
+
+def send(m):
+    if not TOKEN or not CHAT: return
+    try:
+        requests.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',
+                      json={'chat_id': CHAT, 'text': m, 'parse_mode': 'HTML'}, timeout=15)
+    except: pass
 
 def monitor_gmail():
-    """Enhanced Gmail monitoring for recruiter replies and interview invites."""
-    if not os.path.exists('/usr/bin/manus-mcp-cli'):
-        return []
-    
-    print("Monitoring Gmail for recruiter responses...")
-    query = "after:2026/08/21 (shortlisted OR interview OR invite OR congratulations OR offer OR hiring OR 'job alert')"
-    results = run_mcp('gmail', 'gmail_search_messages', {"q": query})
-    if not results or 'messages' not in results:
-        return []
+    print("Monitoring Gmail for recruiter activity...")
+    query = "after:2026/08/20 (interview OR shortlisted OR invite OR offer OR recruiter OR hiring OR 'job alert')"
+    results = run_mcp('gmail', 'gmail_search_messages', {"query": query})
+    if not results or 'messages' not in results: return []
     
     updates = []
-    for msg in results['messages'][:15]:
-        thread = run_mcp('gmail', 'gmail_read_threads', {"thread_ids": [msg['threadId']]})
-        if thread and 'result' in thread and thread['result']:
-            m = thread['result'][0]['messages'][-1]
-            
-            subject = m.get('pickedHeaders', {}).get('subject', 'No Subject')
-            sender = m.get('pickedHeaders', {}).get('from', 'Unknown')
-            snippet = m.get('snippet', '')
-            
-            priority = False
-            if any(k in (subject + snippet).lower() for k in ['shortlisted', 'interview', 'invite', 'congratulations']):
-                priority = True
-            
+    for msg in results['messages'][:10]:
+        details = run_mcp('gmail', 'gmail_get_message', {"id": msg['id']})
+        if details:
+            body = details.get('snippet', '').lower()
+            priority = any(k in body for k in ['shortlisted', 'interview', 'congratulations', 'invite'])
             updates.append({
-                'subject': subject,
-                'from': sender,
-                'snippet': snippet,
+                'subject': details.get('subject', 'No Subject'),
+                'from': details.get('from', 'Unknown'),
                 'priority': priority,
-                'thread_id': msg['threadId']
+                'snippet': details.get('snippet', '')
             })
     return updates
 
-def sync_database(jobs, updates):
-    """Sync new jobs and email updates to Notion and Google Sheets."""
-    if not os.path.exists('/usr/bin/manus-mcp-cli'):
-        return
-    
-    print(f"Syncing {len(jobs)} jobs to Notion...")
-    for j in jobs:
-        props = {
-            "Job Title": j['title'],
-            "Company": j['company'],
-            "Location": j['location'],
-            "URL": j['url'],
-            "Status": "Not started",
-            "date:Date Found:start": datetime.now().strftime('%Y-%m-%d')
-        }
-        run_mcp('notion', 'notion-create-page', {
-            "parent_data_source_url": NOTION_DB_URL,
-            "properties": props
-        })
-
-    if jobs:
-        print("Updating Google Sheets...")
-        rows = [[datetime.now().strftime('%Y-%m-%d'), j['title'], j['company'], j['location'], j['source'], "No", j['url'], "Not started", ""]] for j in jobs]
-        body = {"values": rows}
-        subprocess.run(['gws', 'sheets', '+append', SHEET_ID, 'Applications!A:I', '--input', json.dumps(body)])
-
-def send(m, retries=3):
-    if not TOKEN or not CHAT:
-        print("Telegram config missing, skipping alert.")
-        return
-    for attempt in range(retries):
-        try:
-            r = requests.post(
-                f'https://api.telegram.org/bot{TOKEN}/sendMessage',
-                json={'chat_id': CHAT, 'text': m, 'parse_mode': 'HTML'},
-                timeout=15,
-            )
-            if r.status_code == 200:
-                return
-            print(f'Telegram failed attempt {attempt+1}: {r.text}')
-        except requests.RequestException as e:
-            print(f'Telegram error attempt {attempt+1}: {e}')
-        time.sleep(3)
-
 def main():
+    profile = CandidateProfile(**json.load(open('profile.json')))
+    
     # 1. Scrape Jobs
     allj = []
-    sources = [fetch_linkedin, fetch_internshala, fetch_shine]
-    for f in sources:
-        try:
-            j = f()
-            print(f"{f.__name__}: found {len(j)} jobs")
-            allj += j
-        except Exception as e:
-            print(f"{f.__name__} failed safely: {e}")
-
+    for f in [fetch_linkedin, fetch_internshala, fetch_shine]:
+        try: allj += f()
+        except: pass
     allj = unique(allj)
-
-    # 2. Filter & Deduplicate
-    seen = {}
-    try:
-        with open(SEEN, encoding='utf-8') as f:
-            seen = json.load(f).get('seen', {})
-    except (OSError, ValueError):
-        pass
-
-    now = datetime.now(timezone.utc)
-    cut = now - timedelta(days=DAYS)
-    seen = {k: v for k, v in seen.items() if datetime.fromisoformat(v) > cut}
-
-    alerts = []
-    for j in allj:
-        if not j.get('url') or j['url'] in seen:
-            continue
-        if not any(k in j.get('haystack', '') for k in KEYWORDS):
-            continue
-        if not is_hyd(j):
-            continue
-        alerts.append(j)
-        seen[j['url']] = now.isoformat()
-
-    # 3. Monitor Gmail & Alert Priority
-    email_updates = monitor_gmail()
-    priority_alerts = [u for u in email_updates if u['priority']]
     
-    if priority_alerts:
-        msg = "🚨 <b>URGENT: RECRUITER RESPONSE</b> 🚨\n\n"
-        for u in priority_alerts:
-            msg += f"<b>From:</b> {u['from']}\n"
-            msg += f"<b>Subject:</b> {u['subject']}\n"
-            msg += f"<b>Snippet:</b> {u['snippet'][:150]}...\n\n"
-            msg += "<i>A high-priority recruiter response was detected!</i>\n\n"
-        send(msg)
+    # 2. Filter & Score
+    seen = {}
+    try: seen = json.load(open(SEEN)).get('seen', {})
+    except: pass
+    
+    scored_jobs = []
+    for j in allj:
+        if not j.get('url') or j['url'] in seen: continue
+        if not is_hyd(j): continue
         
+        job_obj = Job(title=j['title'], description=j.get('haystack', ''), location=j['location'], url=j['url'])
+        res = score_job(job_obj, profile)
+        j.update(res)
+        
+        if j['score'] >= 50:
+            scored_jobs.append(j)
+            seen[j['url']] = datetime.now(timezone.utc).isoformat()
+
+    # 3. Gmail & Priority Alerts
+    email_updates = monitor_gmail()
+    for u in email_updates:
+        if u['priority']:
+            send(f"🚨 <b>PRIORITY RECRUITER ALERT</b>\n\nFrom: {u['from']}\nSub: {u['subject']}\n\n<i>{u['snippet']}</i>")
+        elif 'job alert' in u['subject'].lower():
+            pass # Handle regular alerts in summary
+
+    # 4. Database Sync
+    if scored_jobs:
+        scored_jobs.sort(key=lambda x: x['score'], reverse=True)
+        for j in scored_jobs:
+            run_mcp('notion', 'notion-create-page', {
+                "parent_data_source_url": NOTION_DB_URL,
+                "properties": {
+                    "Job Title": j['title'], "Company": j['company'], "Location": j['location'],
+                    "URL": j['url'], "Status": "Not started", "Score": str(j['score'])
+                }
+            })
+        
+        # Google Sheets Sync
+        rows = [[datetime.now().strftime('%Y-%m-%d'), j['title'], j['company'], j['location'], j['source'], str(j['score']), j['url'], "Not started", ""]]
+        subprocess.run(['gws', 'sheets', '+append', SHEET_ID, 'Applications!A:I', '--input', json.dumps({"values": rows})])
+
+    # 5. Auto-Apply Trigger
+    if scored_jobs:
+        print("Triggering Auto-Apply Playbook...")
+        subprocess.run(['manus-config', 'schedule', 'run', 'YQ7cyicc4jtHrfF4rPx'])
+
+    # 6. Final Telegram Report
+    if scored_jobs:
+        msg = f"📋 <b>DAILY JOB REPORT ({len(scored_jobs)})</b>\n"
+        msg += f"<i>AI Scored & Deduplicated</i>\n\n"
+        for j in scored_jobs[:10]:
+            msg += f"⭐ <b>{j['score']}</b> | <b>{j['title']}</b>\n🏢 {j['company']} ({j['source']})\n🔗 <a href='{j['url']}'>Apply</a>\n\n"
+        send(msg)
     elif email_updates:
-        msg = "📧 <b>New Email Updates</b>\n\n"
-        for u in email_updates:
-            msg += f"From: {u['from']}\nSub: {u['subject']}\n\n"
-        send(msg)
+        send("✅ <b>System Check</b>: No new jobs, but monitored Gmail for updates.")
+    else:
+        send("✅ <b>System Check</b>: Job search complete. No new matches found.")
 
-    # 4. Sync Database
-    if alerts:
-        sync_database(alerts, email_updates)
-
-    # 5. Save State
-    with open(SEEN, 'w', encoding='utf-8') as f:
-        json.dump({'last_run_utc': now.isoformat(), 'seen': seen}, f, indent=2)
-
-    # 6. Send Daily Report
-    if alerts:
-        msg = f"📋 <b>DAILY JOB REPORT ({len(alerts)})</b>\n"
-        msg += f"<i>Sources: LinkedIn, Internshala, Shine, Gmail</i>\n\n"
-        for j in alerts[:15]:
-            msg += f"💼 <b>{j['title']}</b>\n🏢 {j['company']} ({j['source']})\n🔗 <a href='{j['url']}'>Apply</a>\n\n"
-        send(msg)
-    elif not priority_alerts:
-        send("✅ <b>System Check</b>: Search complete. No new matches found in the last 3 hours.")
+    with open(SEEN, 'w') as f:
+        json.dump({'last_run_utc': datetime.now(timezone.utc).isoformat(), 'seen': seen}, f, indent=2)
 
 if __name__ == '__main__':
     main()
