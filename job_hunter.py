@@ -102,7 +102,6 @@ def score_job(job: Job, profile: CandidateProfile) -> dict[str, Any]:
     # Experience Match (10 points)
     exp_years = [float(v) for v in re.findall(r"(\d+(?:\.\d+)?)\s*\+?\s*years?", normalize(job.description))]
     required_years = min(exp_years) if exp_years else 0
-    # profile.minimum_experience_years is 0 for fresher
     exp_points = 10.0 if (profile.minimum_experience_years or 0) >= required_years else 5.0 if not exp_years else 0.0
     components.append(ScoreComponent("experience_match", exp_points, 10.0, 
         "Experience met" if exp_points == 10.0 else "Review needed" if exp_points == 5.0 else "Experience gap", [f"Required: {required_years}, Have: {profile.minimum_experience_years}"]))
@@ -234,25 +233,7 @@ def send(m):
                       json={'chat_id': CHAT, 'text': m, 'parse_mode': 'HTML'}, timeout=15)
     except: pass
 
-def check_maintenance():
-    # SGT = UTC + 8
-    now_utc = datetime.now(timezone.utc)
-    maint_start = datetime(2026, 8, 23, 0, 0, tzinfo=timezone.utc) # 8:00 AM SGT
-    maint_end = datetime(2026, 8, 24, 23, 59, tzinfo=timezone.utc) # 7:59 AM SGT on 25th is roughly midnight UTC on 24th
-    
-    if maint_start <= now_utc <= maint_end:
-        msg = ("⚠️ <b>MANUS MAINTENANCE ALERT</b>\n\n"
-               "The Manus platform is currently undergoing scheduled updates (Aug 23 - Aug 25).\n\n"
-               "🔹 <b>Status:</b> Manus Web/App likely offline.\n"
-               "🔹 <b>Your Bot:</b> GitHub automation is ACTIVE and running normally.\n"
-               "🔹 <b>Interview:</b> Maple Tax Consulting tomorrow at 2:00 PM IST.\n\n"
-               "<i>I will continue to send you job alerts every 3 hours as usual.</i>")
-        send(msg)
-
 def main():
-    # Check for maintenance first
-    check_maintenance()
-    
     try:
         with open('profile.json', 'r') as f:
             profile_data = json.load(f)
