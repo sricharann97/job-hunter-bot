@@ -167,6 +167,9 @@ def template_report(report: Mapping[str, Any]) -> str:
         field("Applications sent", report.get("applications_sent"), "0"),
         field("Duplicates skipped", report.get("duplicates_skipped"), "0"),
         field("Rejected / filtered", report.get("rejected"), "0"),
+        field("Non-Hyderabad", report.get("non_hyderabad"), "0"),
+        field("Experience mismatch", report.get("experience_mismatch"), "0"),
+        field("Keyword mismatch", report.get("keyword_mismatch"), "0"),
         field("Recruiter replies", report.get("recruiter_replies"), "0"),
         field("Interview invitations", report.get("interviews"), "0"),
         field("Errors", report.get("errors"), "0"),
@@ -296,6 +299,9 @@ def fetch_commerce_jobs() -> None:
     alerts_sent = 0
     skipped = 0
     duplicates_skipped = 0
+    non_hyderabad = 0
+    experience_mismatch = 0
+    keyword_mismatch = 0
 
     try:
         response = requests.get(API_URL, timeout=TELEGRAM_TIMEOUT_SECONDS)
@@ -316,11 +322,18 @@ def fetch_commerce_jobs() -> None:
             continue
 
         haystack = f"{title} {description}".lower()
-        if (
-            not any(keyword in haystack for keyword in TARGET_KEYWORDS)
-            or not is_hyderabad_job(job)
-            or not is_fresher_friendly(job)
-        ):
+        if not any(keyword in haystack for keyword in TARGET_KEYWORDS):
+            keyword_mismatch += 1
+            skipped += 1
+            seen.add(link)
+            continue
+        if not is_hyderabad_job(job):
+            non_hyderabad += 1
+            skipped += 1
+            seen.add(link)
+            continue
+        if not is_fresher_friendly(job):
+            experience_mismatch += 1
             skipped += 1
             seen.add(link)
             continue
@@ -348,6 +361,9 @@ def fetch_commerce_jobs() -> None:
             "applications_sent": 0,
             "duplicates_skipped": duplicates_skipped,
             "rejected": skipped,
+            "non_hyderabad": non_hyderabad,
+            "experience_mismatch": experience_mismatch,
+            "keyword_mismatch": keyword_mismatch,
             "recruiter_replies": 0,
             "interviews": 0,
             "errors": 0,
