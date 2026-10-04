@@ -1,8 +1,9 @@
-name: Job Alert Bot
+name: Hyderabad Hospital Billing & Desk Job Bot
 
 on:
   schedule:
     - cron: '30 */3 * * *'   # Every 3 hours at :30 UTC = every 3 hours on IST clock
+                              # Hospital OPD/IPD billing, medical billing, data entry and desk roles
   workflow_dispatch:         # lets you trigger it manually to test
 
 permissions:
