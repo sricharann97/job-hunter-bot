@@ -1,34 +1,27 @@
 {
+  "name": "Aadirala Sri Charan",
+  "location": "Hyderabad, India",
+  "degree": "B.Com graduate",
+  "cgpa": "7.41",
+  "graduation_status": "Degree completed",
+  "experience_status": "Fresher",
+  "certifications": ["Tally", "GST"],
   "target_roles": [
     "Accounts Executive",
     "Junior Accountant",
-    "Accounts Assistant",
-    "Accountant Trainee",
-    "Tally Operator",
-    "GST Assistant",
-    "GST Executive",
-    "TDS Assistant",
     "Billing Executive",
-    "Finance Assistant",
-    "Bookkeeper",
-    "Accountant",
-    "Audit Assistant"
+    "Hospital Billing",
+    "OPD Billing",
+    "IPD Billing",
+    "Medical Billing",
+    "Accounts Receivable",
+    "Finance Operations",
+    "Revenue Cycle Management"
   ],
-  "skills": [
-    "Tally ERP9",
-    "GST",
-    "TDS",
-    "MS-Office",
-    "Accounting",
-    "Finance",
-    "Taxation",
-    "Tally"
-  ],
-  "preferred_locations": [
-    "Hyderabad",
-    "Secunderabad",
-    "Telangana",
-    "India"
-  ],
-  "minimum_experience_years": 0
+  "target_location": "Hyderabad only",
+  "current_resume": "/home/ubuntu/upload/Sricharan_Resume_.pdf",
+  "application_wording_rules": {
+    "use": ["B.Com graduate", "7.41 CGPA", "Fresher", "Tally/GST certified"],
+    "do_not_use": ["awaiting 6th-semester results", "awaiting results", "prior employment experience"]
+  }
 }
