@@ -2,19 +2,11 @@ name: Job Alert Bot
 
 on:
   schedule:
-    # Every 3 hours IST (08:30, 11:30, 14:30, 17:30, 20:30, 23:30, 02:30, 05:30)
-    - cron: '0 3 * * *'
-    - cron: '0 6 * * *'
-    - cron: '0 9 * * *'
-    - cron: '0 12 * * *'
-    - cron: '0 15 * * *'
-    - cron: '0 18 * * *'
-    - cron: '0 21 * * *'
-    - cron: '0 0 * * *'
-  workflow_dispatch:
+    - cron: '30 */3 * * *'   # Every 3 hours at :30 UTC = every 3 hours on IST clock
+  workflow_dispatch:         # lets you trigger it manually to test
 
 permissions:
-  contents: write
+  contents: write   # needed so the workflow can commit seen_jobs.json back
 
 jobs:
   run-job-hunter:
@@ -28,13 +20,8 @@ jobs:
         with:
           python-version: '3.12'
 
-      # FIX 9: Indeed geo-blocks all cloud/datacenter IPs ("does not provide
-      # services in your region") — the runner skips Indeed cleanly and its
-      # listings arrive via the Manus research/auto-apply layer instead.
-      # Playwright is still installed so the browser path works when run
-      # outside a datacenter (e.g., home network / residential IP).
       - name: Install dependencies
-        run: pip install requests beautifulsoup4 playwright
+        run: pip install requests
 
       - name: Run job hunter script
         env:
