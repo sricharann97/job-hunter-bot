@@ -19,7 +19,7 @@
     "Revenue Cycle Management"
   ],
   "target_location": "Hyderabad only",
-  "current_resume": "/home/ubuntu/upload/Sricharan_Resume_.pdf",
+  "current_resume": "/home/ubuntu/upload/Sricharan_Resume.pdf",
   "application_wording_rules": {
     "use": ["B.Com graduate", "7.41 CGPA", "Fresher", "Tally/GST certified"],
     "do_not_use": ["awaiting 6th-semester results", "awaiting results", "prior employment experience"]
