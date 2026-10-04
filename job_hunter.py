@@ -12,6 +12,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -59,6 +60,13 @@ TARGET_KEYWORDS = [
     "audit assistant",
 ]
 HYDERABAD_TERMS = {"hyderabad", "hitech city", "hitec city", "secunderabad"}
+EXPERIENCE_REQUIRED_PATTERNS = (
+    r"experience\s+(?:is\s+)?(?:mandatory|required|must|required)",
+    r"minimum\s+(?:of\s+)?[1-9]\d*\s*\+?\s*years?",
+    r"[2-9]\s*[-–]\s*[0-9]+\s*years?",
+    r"mid[- ]senior",
+    r"senior\s+(?:level|accountant|executive|associate|analyst)",
+)
 
 
 def esc(value: Any, fallback: str = "Not specified") -> str:
@@ -271,10 +279,23 @@ def is_hyderabad_job(job: Mapping[str, Any]) -> bool:
     return any(term in f"{location} {description}" for term in HYDERABAD_TERMS)
 
 
+def is_fresher_friendly(job: Mapping[str, Any]) -> bool:
+    """Reject explicit experience requirements; preferred experience is allowed."""
+    title = str(job.get("title") or "").lower()
+    description = str(job.get("description") or "").lower()
+    text = f"{title} {description}"
+    if any(re.search(pattern, text) for pattern in EXPERIENCE_REQUIRED_PATTERNS):
+        return False
+    if re.search(r"\b(?:senior|lead|manager)\b", title):
+        return False
+    return True
+
+
 def fetch_commerce_jobs() -> None:
     seen = load_seen()
     alerts_sent = 0
     skipped = 0
+    duplicates_skipped = 0
 
     try:
         response = requests.get(API_URL, timeout=TELEGRAM_TIMEOUT_SECONDS)
@@ -291,10 +312,15 @@ def fetch_commerce_jobs() -> None:
         description = str(job.get("description") or "")
         link = str(job.get("url") or "")
         if not link or link in seen:
+            duplicates_skipped += 1
             continue
 
         haystack = f"{title} {description}".lower()
-        if not any(keyword in haystack for keyword in TARGET_KEYWORDS) or not is_hyderabad_job(job):
+        if (
+            not any(keyword in haystack for keyword in TARGET_KEYWORDS)
+            or not is_hyderabad_job(job)
+            or not is_fresher_friendly(job)
+        ):
             skipped += 1
             seen.add(link)
             continue
@@ -320,7 +346,7 @@ def fetch_commerce_jobs() -> None:
             "jobs_scanned": len(jobs[:50]),
             "new_matches": alerts_sent,
             "applications_sent": 0,
-            "duplicates_skipped": len(seen) - alerts_sent,
+            "duplicates_skipped": duplicates_skipped,
             "rejected": skipped,
             "recruiter_replies": 0,
             "interviews": 0,
