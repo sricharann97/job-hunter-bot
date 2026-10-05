@@ -17,15 +17,26 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 import requests
+from bs4 import BeautifulSoup
 
 # --- Configuration ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 DRY_RUN = os.getenv("DRY_RUN", "0").lower() in {"1", "true", "yes"}
-API_URL = "https://www.arbeitnow.com/api/job-board-api"
 SEEN_FILE = "seen_jobs.json"
 TELEGRAM_TIMEOUT_SECONDS = 15
 MAX_TELEGRAM_LENGTH = 4096
+REQUEST_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; HyderabadJobHunter/1.0; public-job-discovery)",
+    "Accept-Language": "en-IN,en;q=0.9",
+}
+SEARCH_QUERIES = [
+    "hospital billing",
+    "OPD IPD billing",
+    "medical billing",
+    "data entry",
+    "back office executive",
+]
 
 # Hyderabad-only target terms. The source API may return international/remote roles,
 # so location checks are applied separately in is_hyderabad_job().
@@ -294,6 +305,117 @@ def is_fresher_friendly(job: Mapping[str, Any]) -> bool:
     return True
 
 
+def normalize_link(link: str, source: str) -> str:
+    """Keep public job URLs stable enough for deduplication."""
+    if link.startswith("/"):
+        roots = {
+            "Indeed": "https://in.indeed.com",
+            "LinkedIn": "https://www.linkedin.com",
+            "Naukri": "https://www.naukri.com",
+        }
+        link = roots[source] + link
+    return link.split("?")[0]
+
+
+def text_or_empty(node: Any) -> str:
+    return " ".join(node.get_text(" ", strip=True).split()) if node else ""
+
+
+def parse_indeed(html_text: str) -> list[dict[str, Any]]:
+    soup = BeautifulSoup(html_text, "html.parser")
+    jobs = []
+    for card in soup.select("div.job_seen_beacon"):
+        anchor = card.select_one("h2.jobTitle a, a.jcs-JobTitle")
+        if not anchor:
+            continue
+        jobs.append({
+            "title": text_or_empty(anchor),
+            "company_name": text_or_empty(card.select_one("span.companyName")),
+            "location": text_or_empty(card.select_one("div.companyLocation")),
+            "description": text_or_empty(card.select_one("div.job-snippet")),
+            "url": normalize_link(anchor.get("href", ""), "Indeed"),
+            "source": "Indeed",
+        })
+    return jobs
+
+
+def parse_linkedin(html_text: str) -> list[dict[str, Any]]:
+    soup = BeautifulSoup(html_text, "html.parser")
+    jobs = []
+    for card in soup.select("div.base-card, li.jobs-search__results-list, div.job-search-card"):
+        anchor = card.select_one("a.base-card__full-link, a.base-card__primary-link, a[href*='/jobs/view/']")
+        title_node = card.select_one("h3.base-search-card__title, h3.base-card__full-link")
+        company_node = card.select_one("h4.base-search-card__subtitle, a.hidden-nested-link")
+        location_node = card.select_one("span.job-search-card__location, span.job-card-container__metadata-item")
+        if not anchor or not title_node:
+            continue
+        jobs.append({
+            "title": text_or_empty(title_node),
+            "company_name": text_or_empty(company_node),
+            "location": text_or_empty(location_node),
+            "description": text_or_empty(card),
+            "url": normalize_link(anchor.get("href", ""), "LinkedIn"),
+            "source": "LinkedIn",
+        })
+    return jobs
+
+
+def parse_naukri(html_text: str) -> list[dict[str, Any]]:
+    soup = BeautifulSoup(html_text, "html.parser")
+    jobs = []
+    for card in soup.select("article.jobTuple, div.jobTuple, div.srp-jobtuple-wrapper"):
+        anchor = card.select_one("a.title, a[href*='/job-listings-']")
+        if not anchor:
+            continue
+        jobs.append({
+            "title": text_or_empty(anchor),
+            "company_name": text_or_empty(card.select_one("span.comp-name, a.subTitle")),
+            "location": text_or_empty(card.select_one("span.locWdth, span.loc")),
+            "experience": text_or_empty(card.select_one("span.expwdth, span.exp")),
+            "description": text_or_empty(card),
+            "url": normalize_link(anchor.get("href", ""), "Naukri"),
+            "source": "Naukri",
+        })
+    return jobs
+
+
+def fetch_public_board(source: str, query: str) -> tuple[list[dict[str, Any]], str | None]:
+    """Fetch only public search pages; never logs in or bypasses CAPTCHA/403 responses."""
+    from urllib.parse import quote_plus
+
+    urls = {
+        "Indeed": f"https://in.indeed.com/jobs?q={quote_plus(query)}&l=Hyderabad%2C+Telangana",
+        "LinkedIn": f"https://www.linkedin.com/jobs/search/?keywords={quote_plus(query)}&location=Hyderabad%2C%20Telangana",
+        "Naukri": f"https://www.naukri.com/{quote_plus(query.replace(' ', '-'))}-jobs-in-hyderabad-secunderabad",
+    }
+    parsers = {"Indeed": parse_indeed, "LinkedIn": parse_linkedin, "Naukri": parse_naukri}
+    try:
+        response = requests.get(urls[source], headers=REQUEST_HEADERS, timeout=TELEGRAM_TIMEOUT_SECONDS)
+        if response.status_code in {401, 403, 429}:
+            return [], f"{source} returned HTTP {response.status_code}; public page skipped"
+        response.raise_for_status()
+        return parsers[source](response.text), None
+    except Exception as exc:
+        return [], f"{source} {type(exc).__name__}: {short(exc, 180)}"
+
+
+def fetch_live_jobs() -> tuple[list[dict[str, Any]], list[str]]:
+    jobs: list[dict[str, Any]] = []
+    source_errors: list[str] = []
+    for source in ("Indeed", "LinkedIn", "Naukri"):
+        for query in SEARCH_QUERIES:
+            found, error = fetch_public_board(source, query)
+            jobs.extend(found)
+            if error:
+                source_errors.append(error)
+    unique: dict[str, dict[str, Any]] = {}
+    for job in jobs:
+        link = str(job.get("url") or "")
+        if link and link not in unique:
+            unique[link] = job
+    return list(unique.values()), source_errors
+
+
 def fetch_commerce_jobs() -> None:
     seen = load_seen()
     alerts_sent = 0
@@ -302,18 +424,11 @@ def fetch_commerce_jobs() -> None:
     non_hyderabad = 0
     experience_mismatch = 0
     keyword_mismatch = 0
+    jobs, source_errors = fetch_live_jobs()
+    if source_errors:
+        print("Public source warnings: " + " | ".join(source_errors))
 
-    try:
-        response = requests.get(API_URL, timeout=TELEGRAM_TIMEOUT_SECONDS)
-        response.raise_for_status()
-        jobs = response.json().get("data", [])
-    except Exception as exc:
-        print(f"Error fetching jobs: {type(exc).__name__}: {exc}")
-        notify("ERROR", {"stage": "Job source", "message": str(exc)})
-        save_seen(seen)
-        return
-
-    for job in jobs[:50]:
+    for job in jobs[:300]:
         title = str(job.get("title") or "")
         description = str(job.get("description") or "")
         link = str(job.get("url") or "")
@@ -356,7 +471,7 @@ def fetch_commerce_jobs() -> None:
         "REPORT",
         {
             "period": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-            "jobs_scanned": len(jobs[:50]),
+            "jobs_scanned": len(jobs[:300]),
             "new_matches": alerts_sent,
             "applications_sent": 0,
             "duplicates_skipped": duplicates_skipped,
@@ -366,7 +481,8 @@ def fetch_commerce_jobs() -> None:
             "keyword_mismatch": keyword_mismatch,
             "recruiter_replies": 0,
             "interviews": 0,
-            "errors": 0,
+            "errors": len(source_errors),
+            "notes": "; ".join(source_errors[:3]) if source_errors else "Live public pages checked: Indeed, LinkedIn, Naukri",
         },
     )
     print(f"Run complete. {alerts_sent} new alert(s) sent; {len(seen)} jobs tracked total.")
