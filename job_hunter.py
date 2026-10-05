@@ -198,6 +198,29 @@ def template_top_current_matches(jobs: list[Mapping[str, Any]]) -> str:
     return "\n".join(lines).strip()[:MAX_TELEGRAM_LENGTH]
 
 
+def template_combined_job_alerts(data: Mapping[str, Any]) -> str:
+    new_jobs = list(data.get("new_jobs") or [])
+    current_jobs = list(data.get("current_jobs") or [])
+    new_links = {str(job.get("link") or job.get("url")) for job in new_jobs}
+    current_jobs = [job for job in current_jobs if str(job.get("link") or job.get("url")) not in new_links]
+    all_jobs = [(job, "🆕 NEW") for job in new_jobs] + [(job, "🔁 CURRENT") for job in current_jobs]
+    lines = [
+        f"📋 <b>JOB ALERT REPORT ({len(all_jobs)})</b>",
+        "<i>Hyderabad Billing, Data Entry &amp; Desk Jobs — Scored &amp; Filtered</i>",
+        "",
+    ]
+    for job, label in all_jobs:
+        score = job.get("match_score", match_score(job))
+        link = job.get("link") or job.get("url")
+        lines.extend([
+            f"{label} ⭐ <b>{score} | {esc(job.get('title'), 'Untitled role')}</b>",
+            f"🏢 {esc(job.get('company'), 'Company not specified')} ({esc(job.get('source'), 'Public job board')})",
+            f"🔗 <a href=\"{esc(link)}\">View Job</a>" if link else "🔗 Link unavailable",
+            "",
+        ])
+    return "\n".join(lines).strip()[:MAX_TELEGRAM_LENGTH]
+
+
 def template_red_alert(alert: Mapping[str, Any]) -> str:
     category = alert.get("category") or "Recruiter update"
     subject = alert.get("subject") or alert.get("role") or "Important recruiter message"
@@ -283,6 +306,7 @@ def render_notification(category: str, data: Mapping[str, Any]) -> str:
         "NEW_JOB": template_new_job,
         "JOB_ALERT_REPORT": template_job_alert_report,
         "TOP_CURRENT_MATCHES": template_top_current_matches,
+        "COMBINED_JOB_ALERTS": template_combined_job_alerts,
         "RED_ALERT": template_red_alert,
         "REPORT": template_report,
         "APPLIED": template_applied,
@@ -525,11 +549,6 @@ def fetch_commerce_jobs() -> None:
         matched_jobs.append(notification_job)
         seen.add(link)
 
-    for start in range(0, len(matched_jobs), 8):
-        batch = matched_jobs[start : start + 8]
-        if notify("JOB_ALERT_REPORT", batch):
-            alerts_sent += len(batch)
-
     current_matches: list[dict[str, Any]] = []
     for job in jobs[:300]:
         title = str(job.get("title") or "")
@@ -548,8 +567,12 @@ def fetch_commerce_jobs() -> None:
             "match_score": match_score(job),
         })
     current_matches.sort(key=lambda item: item["match_score"], reverse=True)
-    if current_matches:
-        notify("TOP_CURRENT_MATCHES", current_matches[:5])
+    combined_report = {
+        "new_jobs": matched_jobs,
+        "current_jobs": current_matches[:5],
+    }
+    if (matched_jobs or current_matches) and notify("COMBINED_JOB_ALERTS", combined_report):
+        alerts_sent = len(matched_jobs)
 
     save_seen(seen)
     notify(
