@@ -181,6 +181,23 @@ def template_job_alert_report(jobs: list[Mapping[str, Any]]) -> str:
     return "\n".join(lines).strip()[:MAX_TELEGRAM_LENGTH]
 
 
+def template_top_current_matches(jobs: list[Mapping[str, Any]]) -> str:
+    lines = [
+        f"🔁 <b>TOP CURRENT MATCHES ({len(jobs)})</b>",
+        "<i>Best current Hyderabad matches — repeated for visibility</i>",
+        "",
+    ]
+    for job in jobs:
+        score = job.get("match_score", match_score(job))
+        lines.extend([
+            f"⭐ <b>{score} | {esc(job.get('title'), 'Untitled role')}</b>",
+            f"🏢 {esc(job.get('company'), 'Company not specified')} ({esc(job.get('source'), 'Public job board')})",
+            f"🔗 <a href=\"{esc(job.get('link') or job.get('url'))}\">View Job</a>" if (job.get('link') or job.get('url')) else "🔗 Link unavailable",
+            "",
+        ])
+    return "\n".join(lines).strip()[:MAX_TELEGRAM_LENGTH]
+
+
 def template_red_alert(alert: Mapping[str, Any]) -> str:
     category = alert.get("category") or "Recruiter update"
     subject = alert.get("subject") or alert.get("role") or "Important recruiter message"
@@ -265,6 +282,7 @@ def render_notification(category: str, data: Mapping[str, Any]) -> str:
     renderers = {
         "NEW_JOB": template_new_job,
         "JOB_ALERT_REPORT": template_job_alert_report,
+        "TOP_CURRENT_MATCHES": template_top_current_matches,
         "RED_ALERT": template_red_alert,
         "REPORT": template_report,
         "APPLIED": template_applied,
@@ -452,7 +470,7 @@ def fetch_live_jobs() -> tuple[list[dict[str, Any]], list[str]]:
         link = str(job.get("url") or "")
         if link and link not in unique:
             unique[link] = job
-    return list(unique.values()), source_errors
+    return list(unique.values()), list(dict.fromkeys(source_errors))
 
 
 def fetch_commerce_jobs() -> None:
@@ -511,6 +529,27 @@ def fetch_commerce_jobs() -> None:
         batch = matched_jobs[start : start + 8]
         if notify("JOB_ALERT_REPORT", batch):
             alerts_sent += len(batch)
+
+    current_matches: list[dict[str, Any]] = []
+    for job in jobs[:300]:
+        title = str(job.get("title") or "")
+        description = str(job.get("description") or "")
+        haystack = f"{title} {description}".lower()
+        if not any(keyword in haystack for keyword in TARGET_KEYWORDS):
+            continue
+        if not is_hyderabad_job(job) or not is_fresher_friendly(job):
+            continue
+        current_matches.append({
+            "title": title,
+            "company": job.get("company_name"),
+            "source": job.get("source") or "Public job board",
+            "link": job.get("url"),
+            "description": description,
+            "match_score": match_score(job),
+        })
+    current_matches.sort(key=lambda item: item["match_score"], reverse=True)
+    if current_matches:
+        notify("TOP_CURRENT_MATCHES", current_matches[:5])
 
     save_seen(seen)
     notify(
