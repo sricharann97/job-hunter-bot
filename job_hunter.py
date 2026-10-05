@@ -143,6 +143,44 @@ def template_new_job(job: Mapping[str, Any]) -> str:
     )
 
 
+def match_score(job: Mapping[str, Any]) -> float:
+    """Deterministic fit score for ranking alerts; not an employer guarantee."""
+    text = f"{job.get('title', '')} {job.get('description', '')}".lower()
+    score = 45.0
+    if any(term in text for term in ("hospital billing", "opd billing", "ipd billing", "medical billing")):
+        score += 20
+    elif any(term in text for term in ("billing", "data entry", "back office", "office assistant")):
+        score += 15
+    if any(term in text for term in ("b.com", "commerce", "tally", "gst")):
+        score += 15
+    if any(term in text for term in ("fresher", "0-1 yrs", "0-1 year", "entry level")):
+        score += 10
+    if job.get("source") == "LinkedIn":
+        score += 5
+    return min(99.0, round(score, 1))
+
+
+def template_job_alert_report(jobs: list[Mapping[str, Any]]) -> str:
+    lines = [
+        f"📋 <b>JOB ALERT REPORT ({len(jobs)})</b>",
+        "<i>Hyderabad Billing, Data Entry &amp; Desk Jobs — Scored &amp; Filtered</i>",
+        "",
+    ]
+    for job in jobs:
+        score = job.get("match_score", match_score(job))
+        title = esc(job.get("title"), "Untitled role")
+        company = esc(job.get("company"), "Company not specified")
+        source = esc(job.get("source"), "Public job board")
+        link = job.get("link") or job.get("url")
+        lines.extend([
+            f"⭐ <b>{score} | {title}</b>",
+            f"🏢 {company} ({source})",
+            f"🔗 <a href=\"{esc(link)}\">View Job</a>" if link else "🔗 Link unavailable",
+            "",
+        ])
+    return "\n".join(lines).strip()[:MAX_TELEGRAM_LENGTH]
+
+
 def template_red_alert(alert: Mapping[str, Any]) -> str:
     category = alert.get("category") or "Recruiter update"
     subject = alert.get("subject") or alert.get("role") or "Important recruiter message"
@@ -226,6 +264,7 @@ def render_notification(category: str, data: Mapping[str, Any]) -> str:
     normalized = category.upper().replace(" ", "_")
     renderers = {
         "NEW_JOB": template_new_job,
+        "JOB_ALERT_REPORT": template_job_alert_report,
         "RED_ALERT": template_red_alert,
         "REPORT": template_report,
         "APPLIED": template_applied,
@@ -419,6 +458,7 @@ def fetch_live_jobs() -> tuple[list[dict[str, Any]], list[str]]:
 def fetch_commerce_jobs() -> None:
     seen = load_seen()
     alerts_sent = 0
+    matched_jobs: list[dict[str, Any]] = []
     skipped = 0
     duplicates_skipped = 0
     non_hyderabad = 0
@@ -458,13 +498,19 @@ def fetch_commerce_jobs() -> None:
             "company": job.get("company_name"),
             "location": job.get("location"),
             "experience": "Fresher / verify listing",
-            "source": "Arbeitnow",
+            "source": job.get("source") or "Public job board",
             "application_status": "Not yet applied",
             "link": link,
+            "description": description,
         }
-        if notify("NEW_JOB", notification_job):
-            alerts_sent += 1
+        notification_job["match_score"] = match_score(notification_job)
+        matched_jobs.append(notification_job)
         seen.add(link)
+
+    for start in range(0, len(matched_jobs), 8):
+        batch = matched_jobs[start : start + 8]
+        if notify("JOB_ALERT_REPORT", batch):
+            alerts_sent += len(batch)
 
     save_seen(seen)
     notify(
