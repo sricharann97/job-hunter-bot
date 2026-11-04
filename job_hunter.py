@@ -31,46 +31,70 @@ REQUEST_HEADERS = {
     "Accept-Language": "en-IN,en;q=0.9",
 }
 SEARCH_QUERIES = [
-    "hospital billing",
-    "OPD IPD billing",
-    "medical billing",
-    "data entry",
-    "back office executive",
+    "Maheshwaram jobs",
+    "Tukkuguda jobs",
+    "Raviryala jobs",
+    "Kongara Kalan jobs",
+    "Fab City jobs",
+    "Adibatla jobs",
+    "Shamshabad jobs",
+    "accounts billing Maheshwaram",
+    "warehouse logistics Tukkuguda",
+    "manufacturing Adibatla",
+    "hospital receptionist Tukkuguda",
+    "office assistant Maheshwaram",
+    "sales customer support Shamshabad",
 ]
 
-# Hyderabad-only target terms. The source API may return international/remote roles,
+# Maheshwaram-area target terms. Public boards may return broad results,
 # so location checks are applied separately in is_hyderabad_job().
 TARGET_KEYWORDS = [
-    "accountant",
-    "accounts executive",
-    "billing executive",
-    "hospital billing",
-    "opd billing",
-    "ipd billing",
-    "patient billing",
-    "cash billing",
-    "discharge billing",
-    "front office billing",
-    "medical billing",
-    "data entry",
-    "data entry operator",
-    "computer operator",
-    "back office executive",
-    "back office assistant",
-    "office assistant",
-    "office administrator",
-    "administrative assistant",
-    "admin executive",
-    "documentation executive",
-    "non voice process",
-    "revenue cycle",
-    "accounts receivable",
-    "finance operations",
-    "tally",
-    "gst",
-    "audit assistant",
+	"accountant",
+	"accounts assistant",
+	"accounts executive",
+	"billing",
+	"cashier",
+	"hospital admin",
+	"hospital receptionist",
+	"front office",
+	"receptionist",
+	"data entry",
+	"computer operator",
+	"back office",
+	"office assistant",
+	"admin executive",
+	"documentation",
+	"customer support",
+	"telecaller",
+	"sales executive",
+	"warehouse",
+	"logistics",
+	"picker",
+	"packer",
+	"stores assistant",
+	"inventory",
+	"dispatch",
+	"production operator",
+	"manufacturing",
+	"quality checker",
+	"machine operator",
+	"helper",
+	"security guard",
+	"delivery",
+	"housekeeping",
+	"guest service",
+	"barista",
+	"finance",
+	"bookkeeper",
+	"patient coordinator",
+	"tally",
+	"gst",
 ]
-HYDERABAD_TERMS = {"hyderabad", "hitech city", "hitec city", "secunderabad"}
+LOCALITY_TERMS = {
+	"maheshwaram", "gangaram", "tukkuguda", "tukuguda", "raviryala", "raviryal",
+	"mankhal", "kongara kalan", "kongara", "fab city", "hardware park", "adibatla",
+	"shamshabad", "thummaloor",
+}
 EXPERIENCE_REQUIRED_PATTERNS = (
     r"experience\s+(?:is\s+)?(?:mandatory|required|must|required)",
     r"minimum\s+(?:of\s+)?[1-9]\d*\s*\+?\s*years?",
@@ -147,9 +171,9 @@ def match_score(job: Mapping[str, Any]) -> float:
     """Deterministic fit score for ranking alerts; not an employer guarantee."""
     text = f"{job.get('title', '')} {job.get('description', '')}".lower()
     score = 45.0
-    if any(term in text for term in ("hospital billing", "opd billing", "ipd billing", "medical billing")):
+    if any(term in text for term in ("accounts", "accountant", "billing", "finance", "tally", "gst", "hospital admin")):
         score += 20
-    elif any(term in text for term in ("billing", "data entry", "back office", "office assistant")):
+    elif any(term in text for term in ("warehouse", "logistics", "manufacturing", "production", "office assistant", "back office")):
         score += 15
     if any(term in text for term in ("b.com", "commerce", "tally", "gst")):
         score += 15
@@ -162,8 +186,8 @@ def match_score(job: Mapping[str, Any]) -> float:
 
 def template_job_alert_report(jobs: list[Mapping[str, Any]]) -> str:
     lines = [
-        f"📋 <b>JOB ALERT REPORT ({len(jobs)})</b>",
-        "<i>Hyderabad Billing, Data Entry &amp; Desk Jobs — Scored &amp; Filtered</i>",
+        f"📋 <b>MAHESHWARAM JOB ALERT ({len(jobs)})</b>",
+        "<i>Maheshwaram 10–15 km belt — all sectors, fresher to 2 years</i>",
         "",
     ]
     for job in jobs:
@@ -205,8 +229,8 @@ def template_combined_job_alerts(data: Mapping[str, Any]) -> str:
     current_jobs = [job for job in current_jobs if str(job.get("link") or job.get("url")) not in new_links]
     all_jobs = [(job, "🆕 NEW") for job in new_jobs] + [(job, "🔁 CURRENT") for job in current_jobs]
     lines = [
-        f"📋 <b>JOB ALERT REPORT ({len(all_jobs)})</b>",
-        "<i>Hyderabad Billing, Data Entry &amp; Desk Jobs — Scored &amp; Filtered</i>",
+        f"📋 <b>MAHESHWARAM JOB ALERT ({len(all_jobs)})</b>",
+        "<i>Maheshwaram 10–15 km belt — all sectors, fresher to 2 years</i>",
         "",
     ]
     for job, label in all_jobs:
@@ -369,9 +393,11 @@ def save_seen(seen: set[str]) -> None:
 
 
 def is_hyderabad_job(job: Mapping[str, Any]) -> bool:
+    """Return true only for the approved Maheshwaram-area localities."""
     location = str(job.get("location") or "").lower()
     description = str(job.get("description") or "").lower()
-    return any(term in f"{location} {description}" for term in HYDERABAD_TERMS)
+    haystack = f"{location} {description}"
+    return any(term in haystack for term in LOCALITY_TERMS)
 
 
 def is_fresher_friendly(job: Mapping[str, Any]) -> bool:
@@ -465,9 +491,9 @@ def fetch_public_board(source: str, query: str) -> tuple[list[dict[str, Any]], s
     from urllib.parse import quote_plus
 
     urls = {
-        "Indeed": f"https://in.indeed.com/jobs?q={quote_plus(query)}&l=Hyderabad%2C+Telangana",
-        "LinkedIn": f"https://www.linkedin.com/jobs/search/?keywords={quote_plus(query)}&location=Hyderabad%2C%20Telangana",
-        "Naukri": f"https://www.naukri.com/{quote_plus(query.replace(' ', '-'))}-jobs-in-hyderabad-secunderabad",
+        "Indeed": f"https://in.indeed.com/jobs?q={quote_plus(query)}&l=Maheshwaram%2C+Telangana",
+        "LinkedIn": f"https://www.linkedin.com/jobs/search/?keywords={quote_plus(query)}&location=Maheshwaram%2C%20Telangana",
+        "Naukri": f"https://www.naukri.com/{quote_plus(query.replace(' ', '-'))}-jobs-in-maheshwaram-tukkuguda",
     }
     parsers = {"Indeed": parse_indeed, "LinkedIn": parse_linkedin, "Naukri": parse_naukri}
     try:

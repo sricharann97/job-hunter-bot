@@ -1,6 +1,6 @@
 {
   "name": "Aadirala Sri Charan",
-  "location": "Hyderabad, India",
+  "location": "Maheshwaram, Rangareddy, Telangana",
   "degree": "B.Com graduate",
   "cgpa": "7.41",
   "graduation_status": "Degree completed",
@@ -24,8 +24,19 @@
     ,"Administrative Assistant"
     ,"Admin Executive"
     ,"Documentation Executive"
+    ,"Warehouse Executive"
+    ,"Picker Packer"
+    ,"Logistics Supervisor"
+    ,"Production Operator"
+    ,"Quality Checker"
+    ,"Receptionist"
+    ,"Hospital Admin"
+    ,"Customer Support"
+    ,"Sales Executive"
+    ,"Security Guard"
+    ,"Delivery Executive"
   ],
-  "target_location": "Hyderabad only",
+  "target_location": "Maheshwaram 10-15 km radius",
   "current_resume": "/home/ubuntu/upload/Sricharan_Resume.pdf",
   "application_wording_rules": {
     "use": ["B.Com graduate", "7.41 CGPA", "Fresher", "Tally/GST certified"],

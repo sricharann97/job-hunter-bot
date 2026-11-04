@@ -1,10 +1,10 @@
 # job-hunter-bot
 
-Job alert bot for Hyderabad accounting/finance fresher roles.
+Job alert bot for fresher and 0–2 year jobs within approximately 10–15 km of Maheshwaram.
 
 ## What this repo does
 
-- `job_hunter.py` scans LinkedIn and Indeed for Hyderabad accounting jobs, filters for Hyderabad/India-only fresher roles, deduplicates against `seen_jobs.json`, and sends Telegram alerts.
+- `job_hunter.py` scans public LinkedIn, Indeed, and Naukri pages for Maheshwaram-area all-sector jobs, filters for approved localities and fresher/0–2 year roles, deduplicates against `seen_jobs.json`, and sends Telegram alerts.
 - GitHub Actions runs it every 3 hours (8x/day), commits updated `seen_jobs.json`.
 - A daily weekday 9 AM IST Manus schedule applies to matching jobs by cold email (resume attached), drafts WhatsApp messages, lists portal links, and updates the Notion + Google Sheets trackers. A 9 PM IST schedule sends the evening report on Telegram.
 
